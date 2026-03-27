@@ -31,6 +31,14 @@ func (ch *Channel) Monitor() {
 		pipeline := func() error {
 			return ch.RecordStream(ctx, client)
 		}
+		// isExpectedOffline returns true for errors where the full interval delay is appropriate.
+		// Transient errors (502, decode errors, network hiccups) should retry quickly.
+		isExpectedOffline := func(err error) bool {
+			return errors.Is(err, internal.ErrChannelOffline) ||
+				errors.Is(err, internal.ErrPrivateStream) ||
+				errors.Is(err, internal.ErrAgeVerification) ||
+				errors.Is(err, internal.ErrCloudflareBlocked)
+		}
 		onRetry := func(_ uint, err error) {
 			ch.UpdateOnlineStatus(false)
 
@@ -38,18 +46,26 @@ func (ch *Channel) Monitor() {
 				ch.Info("channel is offline or private, try again in %d min(s)", server.Config.Interval)
 			} else if errors.Is(err, internal.ErrCloudflareBlocked) {
 				ch.Info("channel was blocked by Cloudflare; try with `-cookies` and `-user-agent`? try again in %d min(s)", server.Config.Interval)
+			} else if errors.Is(err, internal.ErrAgeVerification) {
+				ch.Info("age verification required; pass cookies with `-cookies` to authenticate, try again in %d min(s)", server.Config.Interval)
 			} else if errors.Is(err, context.Canceled) {
 				// ...
 			} else {
-				ch.Error("on retry: %s: retrying in %d min(s)", err.Error(), server.Config.Interval)
+				ch.Error("on retry: %s: retrying in 10s", err.Error())
 			}
+		}
+		delayFn := func(_ uint, err error, _ *retry.Config) time.Duration {
+			if isExpectedOffline(err) {
+				return time.Duration(server.Config.Interval) * time.Minute
+			}
+			// Transient error (502, decode failure, network hiccup) - recover quickly
+			return 10 * time.Second
 		}
 		if err = retry.Do(
 			pipeline,
 			retry.Context(ctx),
 			retry.Attempts(0),
-			retry.Delay(time.Duration(server.Config.Interval)*time.Minute),
-			retry.DelayType(retry.FixedDelay),
+			retry.DelayType(delayFn),
 			retry.OnRetry(onRetry),
 		); err != nil {
 			break
@@ -83,7 +99,13 @@ func (ch *Channel) RecordStream(ctx context.Context, client *chaturbate.Client) 
 	ch.StreamedAt = time.Now().Unix()
 	ch.Sequence = 0
 
-	if err := ch.NextFile(); err != nil {
+	playlist, err := stream.GetPlaylist(ctx, ch.Config.Resolution, ch.Config.Framerate)
+	if err != nil {
+		return fmt.Errorf("get playlist: %w", err)
+	}
+
+	ch.FileExt = playlist.FileExt
+	if err := ch.NextFile(playlist.FileExt); err != nil {
 		return fmt.Errorf("next file: %w", err)
 	}
 
@@ -94,13 +116,17 @@ func (ch *Channel) RecordStream(ctx context.Context, client *chaturbate.Client) 
 		}
 	}()
 
-	playlist, err := stream.GetPlaylist(ctx, ch.Config.Resolution, ch.Config.Framerate)
-	if err != nil {
-		return fmt.Errorf("get playlist: %w", err)
-	}
 	ch.UpdateOnlineStatus(true) // Update online status after `GetPlaylist` is OK
 
-	ch.Info("stream quality - resolution %dp (target: %dp), framerate %dfps (target: %dfps)", playlist.Resolution, ch.Config.Resolution, playlist.Framerate, ch.Config.Framerate)
+	streamType := "HLS"
+	if playlist.FileExt == ".mp4" {
+		if playlist.AudioPlaylistURL != "" {
+			streamType = "LL-HLS (video+audio)"
+		} else {
+			streamType = "LL-HLS (video only)"
+		}
+	}
+	ch.Info("stream type: %s, resolution %dp (target: %dp), framerate %dfps (target: %dfps)", streamType, playlist.Resolution, ch.Config.Resolution, playlist.Framerate, ch.Config.Framerate)
 
 	return playlist.WatchSegments(ctx, ch.HandleSegment)
 }
@@ -124,7 +150,7 @@ func (ch *Channel) HandleSegment(b []byte, duration float64) error {
 	ch.Update()
 
 	if ch.ShouldSwitchFile() {
-		if err := ch.NextFile(); err != nil {
+		if err := ch.NextFile(ch.FileExt); err != nil {
 			return fmt.Errorf("next file: %w", err)
 		}
 		ch.Info("max filesize or duration exceeded, new file created: %s", ch.File.Name())

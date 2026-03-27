@@ -23,6 +23,7 @@ type Channel struct {
 	Duration   float64 // Seconds
 	Filesize   int     // Bytes
 	Sequence   int
+	FileExt    string  // ".ts" or ".mp4", set per-stream
 
 	Logs []string
 

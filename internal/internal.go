@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 // FormatDuration converts a float64 duration (in seconds) to h:m:s format.
@@ -41,15 +42,29 @@ func FormatFilesize(filesize int) string {
 	}
 }
 
-// SegmentSeq extracts the segment sequence number from a filename.
+// SegmentSeq extracts the segment sequence number from a URI.
+// Handles both legacy .ts segments (e.g. chunk_12345.ts) and
+// LL-HLS .m4s segments (e.g. seg_4_10879_video_..._llhls.m4s).
 func SegmentSeq(filename string) int {
+	// Strip query string before matching
+	clean := filename
+	if idx := strings.Index(clean, "?"); idx >= 0 {
+		clean = clean[:idx]
+	}
+	// LL-HLS fMP4: seg_<id>_<seq>_<type>_..._llhls.m4s
+	if strings.HasSuffix(clean, ".m4s") {
+		re := regexp.MustCompile(`seg_\d+_(\d+)_`)
+		if match := re.FindStringSubmatch(clean); len(match) > 1 {
+			if n, err := strconv.Atoi(match[1]); err == nil {
+				return n
+			}
+		}
+	}
+	// Legacy HLS: _<seq>.ts
 	re := regexp.MustCompile(`_(\d+)\.ts$`)
-	match := re.FindStringSubmatch(filename)
-
-	if len(match) > 1 {
-		number, err := strconv.Atoi(match[1])
-		if err == nil {
-			return number
+	if match := re.FindStringSubmatch(clean); len(match) > 1 {
+		if n, err := strconv.Atoi(match[1]); err == nil {
+			return n
 		}
 	}
 	return -1

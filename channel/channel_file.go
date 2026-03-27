@@ -5,9 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"github.com/teacat/chaturbate-dvr/chaturbate"
 )
 
 // Pattern holds the date/time and sequence information for the filename pattern
@@ -22,8 +26,9 @@ type Pattern struct {
 	Sequence int
 }
 
-// NextFile prepares the next file to be created, by cleaning up the last file and generating a new one
-func (ch *Channel) NextFile() error {
+// NextFile prepares the next file to be created, by cleaning up the last file and generating a new one.
+// ext is the file extension to use (e.g. ".ts" or ".mp4").
+func (ch *Channel) NextFile(ext string) error {
 	if err := ch.Cleanup(); err != nil {
 		return err
 	}
@@ -31,7 +36,7 @@ func (ch *Channel) NextFile() error {
 	if err != nil {
 		return err
 	}
-	if err := ch.CreateNewFile(filename); err != nil {
+	if err := ch.CreateNewFile(filename, ext); err != nil {
 		return err
 	}
 
@@ -59,6 +64,7 @@ func (ch *Channel) Cleanup() error {
 	if err := ch.File.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
 		return fmt.Errorf("close file: %w", err)
 	}
+	ch.File = nil
 
 	// Delete the empty file
 	fileInfo, err := os.Stat(filename)
@@ -69,6 +75,14 @@ func (ch *Channel) Cleanup() error {
 		if err := os.Remove(filename); err != nil {
 			return fmt.Errorf("remove zero file: %w", err)
 		}
+	} else if fileInfo != nil && strings.HasSuffix(filename, ".mp4") {
+		// Append mfra seek index so players like VLC can seek instantly.
+		// Run in background so it does not block the recording of the next file.
+		go func() {
+			if err := chaturbate.BuildSeekIndex(filename); err != nil {
+				log.Printf("WARN  seek index %s: %v", filename, err)
+			}
+		}()
 	}
 	return nil
 }
@@ -102,8 +116,8 @@ func (ch *Channel) GenerateFilename() (string, error) {
 	return buf.String(), nil
 }
 
-// CreateNewFile creates a new file for the channel using the given filename
-func (ch *Channel) CreateNewFile(filename string) error {
+// CreateNewFile creates a new file for the channel using the given filename and extension.
+func (ch *Channel) CreateNewFile(filename, ext string) error {
 
 	// Ensure the directory exists before creating the file
 	if err := os.MkdirAll(filepath.Dir(filename), 0777); err != nil {
@@ -111,7 +125,7 @@ func (ch *Channel) CreateNewFile(filename string) error {
 	}
 
 	// Open the file in append mode, create it if it doesn't exist
-	file, err := os.OpenFile(filename+".ts", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0777)
+	file, err := os.OpenFile(filename+ext, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0777)
 	if err != nil {
 		return fmt.Errorf("cannot open file: %s: %w", filename, err)
 	}

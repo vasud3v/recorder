@@ -257,6 +257,16 @@ func (m *Manager) Subscriber(w http.ResponseWriter, r *http.Request) {
 	m.SSE.ServeHTTP(w, r)
 }
 
+// GetChannelThumb returns the current summary card image URL for the given username.
+// Returns an empty string if the channel is not found or has no image.
+func (m *Manager) GetChannelThumb(username string) string {
+	val, ok := m.Channels.Load(username)
+	if !ok {
+		return ""
+	}
+	return val.(*channel.Channel).SummaryCardImage
+}
+
 // Shutdown gracefully stops all active channels, saves config, and waits for
 // in-progress file cleanup and seek-index goroutines to finish.
 // Call this before process exit to ensure recorded files are properly closed

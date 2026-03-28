@@ -19,12 +19,17 @@ type Channel struct {
 	LogCh      chan string
 	UpdateCh   chan bool
 
-	IsOnline   bool
-	StreamedAt int64
-	Duration   float64 // Seconds
-	Filesize   int     // Bytes
-	Sequence   int
-	FileExt    string  // ".ts" or ".mp4", set per-stream
+	IsOnline         bool
+	StreamedAt       int64
+	Duration         float64 // Seconds
+	Filesize         int     // Bytes
+	Sequence         int
+	FileExt          string  // ".ts" or ".mp4", set per-stream
+	RoomTitle        string
+	Gender           string
+	NumViewers       int
+	EdgeRegion       string
+	SummaryCardImage string
 
 	logsMu sync.RWMutex
 	Logs   []string
@@ -104,18 +109,23 @@ func (ch *Channel) ExportInfo() *entity.ChannelInfo {
 	ch.logsMu.RUnlock()
 
 	return &entity.ChannelInfo{
-		IsOnline:     ch.IsOnline,
-		IsPaused:     ch.Config.IsPaused,
-		Username:     ch.Config.Username,
-		MaxDuration:  internal.FormatDuration(float64(ch.Config.MaxDuration * 60)), // MaxDuration from config is in minutes
-		MaxFilesize:  internal.FormatFilesize(ch.Config.MaxFilesize * 1024 * 1024), // MaxFilesize from config is in MB
-		StreamedAt:   streamedAt,
-		CreatedAt:    ch.Config.CreatedAt,
-		Duration:     internal.FormatDuration(ch.Duration),
-		Filesize:     internal.FormatFilesize(ch.Filesize),
-		Filename:     filename,
-		Logs:         logs,
-		GlobalConfig: server.Config,
+		IsOnline:         ch.IsOnline,
+		IsPaused:         ch.Config.IsPaused,
+		Username:         ch.Config.Username,
+		MaxDuration:      internal.FormatDuration(float64(ch.Config.MaxDuration * 60)), // MaxDuration from config is in minutes
+		MaxFilesize:      internal.FormatFilesize(ch.Config.MaxFilesize * 1024 * 1024), // MaxFilesize from config is in MB
+		StreamedAt:       streamedAt,
+		CreatedAt:        ch.Config.CreatedAt,
+		Duration:         internal.FormatDuration(ch.Duration),
+		Filesize:         internal.FormatFilesize(ch.Filesize),
+		Filename:         filename,
+		Logs:             logs,
+		GlobalConfig:     server.Config,
+		RoomTitle:        ch.RoomTitle,
+		Gender:           ch.Gender,
+		NumViewers:       ch.NumViewers,
+		EdgeRegion:       ch.EdgeRegion,
+		SummaryCardImage: ch.SummaryCardImage,
 	}
 }
 
@@ -155,5 +165,8 @@ func (ch *Channel) Resume(startSeq int) {
 // UpdateOnlineStatus updates the online status of the channel.
 func (ch *Channel) UpdateOnlineStatus(isOnline bool) {
 	ch.IsOnline = isOnline
+	if !isOnline {
+		ch.NumViewers = 0
+	}
 	ch.Update()
 }

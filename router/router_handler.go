@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/teacat/chaturbate-dvr/entity"
+	"github.com/teacat/chaturbate-dvr/internal"
 	"github.com/teacat/chaturbate-dvr/manager"
 	"github.com/teacat/chaturbate-dvr/server"
 )
@@ -85,6 +86,26 @@ func ResumeChannel(c *gin.Context) {
 	server.Manager.ResumeChannel(c.Param("username"))
 
 	c.Redirect(http.StatusFound, "/")
+}
+
+// ThumbProxy proxies the channel's summary card image from the CDN through the server.
+// This avoids hotlink-protection issues when the browser requests the image directly.
+func ThumbProxy(c *gin.Context) {
+	imgURL := server.Manager.GetChannelThumb(c.Param("username"))
+	if imgURL == "" {
+		c.Status(http.StatusNotFound)
+		return
+	}
+
+	req := internal.NewMediaReq()
+	imgBytes, err := req.GetBytes(c.Request.Context(), imgURL)
+	if err != nil {
+		c.Status(http.StatusBadGateway)
+		return
+	}
+
+	contentType := http.DetectContentType(imgBytes)
+	c.Data(http.StatusOK, contentType, imgBytes)
 }
 
 // Updates handles the SSE connection for updates.

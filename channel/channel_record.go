@@ -18,6 +18,15 @@ func (ch *Channel) Monitor() {
 	client := chaturbate.NewClient()
 	ch.Info("starting to record `%s`", ch.Config.Username)
 
+	// Seed StreamedAt from biocontext if we haven't seen this channel stream yet.
+	if ch.StreamedAt == 0 {
+		if ts, err := chaturbate.FetchLastBroadcast(context.Background(), client.Req, ch.Config.Username); err == nil && ts > 0 {
+			ch.StreamedAt = ts
+			ch.Update()
+		}
+	}
+
+
 	// Create a new context with a cancel function,
 	// the CancelFunc will be stored in the channel's CancelFunc field
 	// and will be called by `Pause` or `Stop` functions
@@ -104,11 +113,28 @@ func (ch *Channel) Update() {
 // It retrieves the stream information and starts watching the segments.
 func (ch *Channel) RecordStream(ctx context.Context, client *chaturbate.Client) error {
 	stream, err := client.GetStream(ctx, ch.Config.Username)
+	// Update static metadata whenever the API responds, even if the channel is offline.
+	// This ensures thumbnails and room info show for channels not currently recording.
+	if stream != nil {
+		if stream.RoomTitle != "" {
+			ch.RoomTitle = stream.RoomTitle
+		}
+		if stream.Gender != "" {
+			ch.Gender = stream.Gender
+		}
+		if stream.EdgeRegion != "" {
+			ch.EdgeRegion = stream.EdgeRegion
+		}
+		if stream.SummaryCardImage != "" {
+			ch.SummaryCardImage = stream.SummaryCardImage
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("get stream: %w", err)
 	}
 	ch.StreamedAt = time.Now().Unix()
 	ch.Sequence = 0
+	ch.NumViewers = stream.NumViewers
 
 	playlist, err := stream.GetPlaylist(ctx, ch.Config.Resolution, ch.Config.Framerate)
 	if err != nil {

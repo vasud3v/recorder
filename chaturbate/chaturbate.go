@@ -30,9 +30,14 @@ func (c *Client) GetStream(ctx context.Context, username string) (*Stream, error
 }
 
 type apiResponse struct {
-	RoomStatus string `json:"room_status"`
-	HLSSource  string `json:"hls_source"`
-	Code       string `json:"code"`
+	RoomStatus       string `json:"room_status"`
+	HLSSource        string `json:"hls_source"`
+	Code             string `json:"code"`
+	RoomTitle        string `json:"room_title"`
+	Gender           string `json:"broadcaster_gender"`
+	NumViewers       int    `json:"num_viewers"`
+	EdgeRegion       string `json:"edge_region"`
+	SummaryCardImage string `json:"summary_card_image"`
 }
 
 func FetchStream(ctx context.Context, client *internal.Req, username string) (*Stream, error) {
@@ -55,22 +60,64 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 		fmt.Printf("[DEBUG] API response for %s: room_status=%s hls_source=%v\n", username, resp.RoomStatus, resp.HLSSource != "")
 	}
 
+	// Always populate static metadata so the caller can update it even when offline.
+	meta := &Stream{
+		RoomTitle:        resp.RoomTitle,
+		Gender:           resp.Gender,
+		EdgeRegion:       resp.EdgeRegion,
+		SummaryCardImage: resp.SummaryCardImage,
+	}
+
 	if resp.HLSSource != "" {
-		return &Stream{HLSSource: resp.HLSSource}, nil
+		meta.HLSSource = resp.HLSSource
+		meta.NumViewers = resp.NumViewers
+		return meta, nil
 	}
 
 	switch resp.RoomStatus {
 	case "private":
-		return nil, internal.ErrPrivateStream
+		return meta, internal.ErrPrivateStream
 	case "hidden":
-		return nil, internal.ErrHiddenStream
+		return meta, internal.ErrHiddenStream
 	default:
-		return nil, internal.ErrChannelOffline
+		return meta, internal.ErrChannelOffline
 	}
 }
 
+// bioResponse is the subset of fields we care about from the biocontext API.
+type bioResponse struct {
+	LastBroadcast string `json:"last_broadcast"`
+}
+
+// FetchLastBroadcast calls the biocontext API and returns the last_broadcast
+// time as a Unix timestamp, or 0 if unavailable.
+func FetchLastBroadcast(ctx context.Context, req *internal.Req, username string) (int64, error) {
+	apiURL := fmt.Sprintf("%sapi/biocontext/%s/", server.Config.Domain, username)
+	body, err := req.Get(ctx, apiURL)
+	if err != nil {
+		return 0, fmt.Errorf("fetch biocontext: %w", err)
+	}
+	var bio bioResponse
+	if err := json.Unmarshal([]byte(body), &bio); err != nil {
+		return 0, fmt.Errorf("parse biocontext: %w", err)
+	}
+	if bio.LastBroadcast == "" {
+		return 0, nil
+	}
+	t, err := time.Parse("2006-01-02T15:04:05.999", bio.LastBroadcast)
+	if err != nil {
+		return 0, fmt.Errorf("parse last_broadcast: %w", err)
+	}
+	return t.Unix(), nil
+}
+
 type Stream struct {
-	HLSSource string
+	HLSSource        string
+	RoomTitle        string
+	Gender           string
+	NumViewers       int
+	EdgeRegion       string
+	SummaryCardImage string
 }
 
 func (s *Stream) GetPlaylist(ctx context.Context, resolution, framerate int) (*Playlist, error) {

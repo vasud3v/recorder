@@ -53,6 +53,7 @@ func SetupStatic(r *gin.Engine) {
 func SetupViews(r *gin.Engine) {
 	r.GET("/", Index)
 	r.GET("/updates", Updates)
+	r.GET("/thumb/:username", ThumbProxy)
 	r.POST("/update_config", UpdateConfig)
 	r.POST("/create_channel", CreateChannel)
 	r.POST("/stop_channel/:username", StopChannel)

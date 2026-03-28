@@ -44,6 +44,7 @@ type ChannelInfo struct {
 	Username         string
 	Duration         string
 	Filesize         string
+	TotalDiskUsage   string
 	Filename         string
 	StreamedAt       string
 	MaxDuration      string

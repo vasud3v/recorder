@@ -84,6 +84,15 @@
         </div>
     </div>
 
+    <!-- Info: Total disk usage -->
+    <div class="ts-grid has-top-spaced">
+        <div class="column"><span class="ts-icon is-hard-drive-icon"></span></div>
+        <div class="column is-fluid">
+            <div class="ts-text is-small is-bold">Total recordings</div>
+            <div class="ts-text is-description">{{ if .TotalDiskUsage }}{{ .TotalDiskUsage }}{{ else }}-{{ end }}</div>
+        </div>
+    </div>
+
     <!-- Actions -->
     <div class="ts-grid is-2-columns has-top-spaced-large">
         <div class="column">
@@ -148,6 +157,7 @@
         <div class="ts-meta has-top-spaced-small is-small">
             {{ if .Duration }}<span class="item"><span class="ts-icon is-clock-icon"></span> {{ .Duration }}</span>{{ end }}
             {{ if .Filesize }}<span class="item"><span class="ts-icon is-chart-pie-icon"></span> {{ .Filesize }}</span>{{ end }}
+            {{ if .TotalDiskUsage }}<span class="item"><span class="ts-icon is-hard-drive-icon"></span> {{ .TotalDiskUsage }}</span>{{ end }}
         </div>
         <div class="ts-grid is-2-columns has-top-spaced">
             <div class="column">

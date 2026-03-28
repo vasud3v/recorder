@@ -19,18 +19,19 @@ type Channel struct {
 	LogCh      chan string
 	UpdateCh   chan bool
 
-	IsOnline         bool
-	StreamedAt       int64
-	Duration         float64 // Seconds
-	Filesize         int     // Bytes
-	Sequence         int
-	FileExt          string  // ".ts" or ".mp4", set per-stream
-	RoomTitle        string
-	Gender           string
-	NumViewers       int
-	EdgeRegion       string
-	SummaryCardImage string
-	CFBlockCount     int
+	IsOnline            bool
+	StreamedAt          int64
+	Duration            float64 // Seconds
+	Filesize            int     // Bytes
+	TotalDiskUsageBytes int64   // Total bytes across all recordings for this channel
+	Sequence            int
+	FileExt             string  // ".ts" or ".mp4", set per-stream
+	RoomTitle           string
+	Gender              string
+	NumViewers          int
+	EdgeRegion          string
+	SummaryCardImage    string
+	CFBlockCount        int
 
 	logsMu sync.RWMutex
 	Logs   []string
@@ -123,6 +124,7 @@ func (ch *Channel) ExportInfo() *entity.ChannelInfo {
 		CreatedAt:        ch.Config.CreatedAt,
 		Duration:         internal.FormatDuration(ch.Duration),
 		Filesize:         internal.FormatFilesize(ch.Filesize),
+		TotalDiskUsage:   internal.FormatFilesize(int(ch.TotalDiskUsageBytes)),
 		Filename:         filename,
 		Logs:             logs,
 		GlobalConfig:     server.Config,

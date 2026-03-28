@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -84,6 +85,9 @@ func (ch *Channel) Cleanup() error {
 			}
 		}()
 	}
+
+	// Rescan total disk usage after a file is closed so the UI stays current.
+	go ch.ScanTotalDiskUsage()
 	return nil
 }
 
@@ -132,6 +136,41 @@ func (ch *Channel) CreateNewFile(filename, ext string) error {
 
 	ch.File = file
 	return nil
+}
+
+// recordingDirFromPattern extracts the base directory from a filename pattern
+// like "videos/{{.Username}}_..." → "videos".
+func recordingDirFromPattern(pattern string) string {
+	idx := strings.Index(pattern, "{{")
+	if idx == -1 {
+		return "."
+	}
+	dir := filepath.Dir(pattern[:idx])
+	if dir == "" || dir == "." {
+		return "."
+	}
+	return dir
+}
+
+// ScanTotalDiskUsage calculates the total bytes of all recordings for this channel
+// by walking the recording directory for files whose name starts with the username.
+// The result is stored in TotalDiskUsageBytes.
+func (ch *Channel) ScanTotalDiskUsage() {
+	dir := recordingDirFromPattern(ch.Config.Pattern)
+	prefix := ch.Config.Username
+	var total int64
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if strings.HasPrefix(filepath.Base(path), prefix) {
+			if info, err2 := d.Info(); err2 == nil {
+				total += info.Size()
+			}
+		}
+		return nil
+	})
+	ch.TotalDiskUsageBytes = total
 }
 
 // ShouldSwitchFile determines whether a new file should be created.

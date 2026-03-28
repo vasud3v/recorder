@@ -19,6 +19,9 @@ func (ch *Channel) Monitor() {
 	client := chaturbate.NewClient()
 	ch.Info("starting to record `%s`", ch.Config.Username)
 
+	// Seed total disk usage in the background so the UI shows it immediately.
+	go ch.ScanTotalDiskUsage()
+
 	// Seed StreamedAt from biocontext if we haven't seen this channel stream yet.
 	if ch.StreamedAt == 0 {
 		if ts, err := chaturbate.FetchLastBroadcast(context.Background(), client.Req, ch.Config.Username); err == nil && ts > 0 {

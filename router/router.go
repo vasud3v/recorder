@@ -5,6 +5,8 @@ import (
 	"html/template"
 	"log"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/teacat/chaturbate-dvr/router/view"
@@ -15,7 +17,10 @@ import (
 func SetupRouter() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 
-	r := gin.Default()
+	r := gin.New()
+	r.Use(gin.Recovery())
+	r.Use(requestLogger())
+
 	if err := LoadHTMLFromEmbedFS(r, view.FS, "templates/index.html", "templates/channel_info.html"); err != nil {
 		log.Fatalf("failed to load HTML templates: %v", err)
 	}
@@ -28,6 +33,41 @@ func SetupRouter() *gin.Engine {
 	SetupViews(r)
 
 	return r
+}
+
+// silentPaths are request paths suppressed from the console log in normal mode.
+// They are high-frequency, low-signal endpoints that clutter the output.
+var silentPaths = []string{
+	"/api/stats",
+	"/updates",
+	"/thumb/",
+	"/static/",
+}
+
+// requestLogger returns a Gin middleware that logs HTTP requests.
+// In normal mode, high-frequency housekeeping endpoints are suppressed.
+// In debug mode, every request is logged.
+func requestLogger() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+
+		path := c.Request.URL.Path
+		if !server.Config.Debug {
+			for _, prefix := range silentPaths {
+				if strings.HasPrefix(path, prefix) {
+					return
+				}
+			}
+		}
+
+		log.Printf("  WEB [%s] %d %s %s",
+			time.Since(start).Round(time.Millisecond),
+			c.Writer.Status(),
+			c.Request.Method,
+			path,
+		)
+	}
 }
 
 // SetupAuth applies basic authentication if credentials are provided.

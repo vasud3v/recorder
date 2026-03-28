@@ -234,7 +234,7 @@ func (ch *Channel) HandleSegment(b []byte, duration float64) error {
 
 	ch.Filesize += n
 	ch.Duration += duration
-	ch.Info("duration: %s, filesize: %s", internal.FormatDuration(ch.Duration), internal.FormatFilesize(ch.Filesize))
+	ch.Verbose("duration: %s, filesize: %s", internal.FormatDuration(ch.Duration), internal.FormatFilesize(ch.Filesize))
 
 	// Send an SSE update to update the view
 	ch.Update()

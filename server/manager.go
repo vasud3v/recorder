@@ -10,17 +10,17 @@ var Manager IManager
 
 type IManager interface {
 	CreateChannel(conf *entity.ChannelConfig, shouldSave bool) error
-	StopChannel(username string) error
-	PauseChannel(username string) error
-	ResumeChannel(username string) error
+	StopChannel(channelID string) error
+	PauseChannel(channelID string) error
+	ResumeChannel(channelID string) error
 	ChannelInfo() []*entity.ChannelInfo
 	Publish(name string, ch *entity.ChannelInfo)
 	Subscriber(w http.ResponseWriter, r *http.Request)
 	LoadConfig() error
 	SaveConfig() error
 	Shutdown()
-	GetChannelThumb(username string) string
-	GetChannelLiveThumb(username string) string
+	GetChannelThumb(channelID string) string
+	GetChannelLiveThumb(channelID string) string
 	ReportCFBlock(username string)
 	ResetCFBlock(username string)
 	GetStats() StatsResponse

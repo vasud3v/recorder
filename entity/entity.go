@@ -35,11 +35,38 @@ type ChannelConfig struct {
 func (c *ChannelConfig) Sanitize() {
 	c.Username = regexp.MustCompile(`[^a-zA-Z0-9_-]`).ReplaceAllString(c.Username, "")
 	c.Username = strings.TrimSpace(c.Username)
+	c.Site = NormalizeSite(c.Site)
+}
+
+// NormalizeSite returns a supported site name, defaulting to Chaturbate.
+func NormalizeSite(site string) string {
+	if site == "stripchat" {
+		return "stripchat"
+	}
+	return "chaturbate"
+}
+
+// NormalizeFinalizeMode returns a supported finalization mode.
+func NormalizeFinalizeMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "remux":
+		return "remux"
+	case "transcode":
+		return "transcode"
+	default:
+		return "none"
+	}
+}
+
+// ChannelID returns the stable internal identifier for a site+username pair.
+func ChannelID(site, username string) string {
+	return NormalizeSite(site) + "__" + username
 }
 
 // ChannelInfo represents the information about a channel,
 // mostly used for the template rendering.
 type ChannelInfo struct {
+	ChannelID        string
 	IsOnline         bool
 	IsPaused         bool
 	Username         string
@@ -65,21 +92,28 @@ type ChannelInfo struct {
 
 // Config holds the configuration for the application.
 type Config struct {
-	Version       string
-	Username      string
-	AdminUsername string
-	AdminPassword string
-	Framerate     int
-	Resolution    int
-	Pattern       string
-	MaxDuration   int
-	MaxFilesize   int
-	Port          string
-	Interval      int
-	Cookies       string
-	UserAgent     string
-	Domain        string
-	Debug         bool
+	Version         string
+	Username        string
+	Site            string
+	AdminUsername   string
+	AdminPassword   string
+	Framerate       int
+	Resolution      int
+	Pattern         string
+	MaxDuration     int
+	MaxFilesize     int
+	Port            string
+	Interval        int
+	Cookies         string
+	UserAgent       string
+	Domain          string
+	CompletedDir    string
+	FinalizeMode    string
+	FFmpegEncoder   string
+	FFmpegContainer string
+	FFmpegQuality   int
+	FFmpegPreset    string
+	Debug           bool
 
 	// Notification settings — persisted in settings.json, configured via web UI.
 	NtfyURL             string

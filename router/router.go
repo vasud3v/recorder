@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/HeapOfChaos/goondvr/router/view"
 	"github.com/HeapOfChaos/goondvr/server"
+	"github.com/gin-gonic/gin"
 )
 
 // SetupRouter initializes and returns the Gin router.
@@ -94,13 +94,13 @@ func SetupStatic(r *gin.Engine) {
 func SetupViews(r *gin.Engine) {
 	r.GET("/", Index)
 	r.GET("/updates", Updates)
-	r.GET("/thumb/:username", ThumbProxy)
-	r.GET("/live-thumb/:username", LiveThumbProxy)
+	r.GET("/thumb/:channelID", ThumbProxy)
+	r.GET("/live-thumb/:channelID", LiveThumbProxy)
 	r.POST("/update_config", UpdateConfig)
 	r.POST("/create_channel", CreateChannel)
-	r.POST("/stop_channel/:username", StopChannel)
-	r.POST("/pause_channel/:username", PauseChannel)
-	r.POST("/resume_channel/:username", ResumeChannel)
+	r.POST("/stop_channel/:channelID", StopChannel)
+	r.POST("/pause_channel/:channelID", PauseChannel)
+	r.POST("/resume_channel/:channelID", ResumeChannel)
 	r.GET("/api/stats", Stats)
 }
 

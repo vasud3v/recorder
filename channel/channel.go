@@ -39,6 +39,9 @@ type Channel struct {
 	Logs   []string
 
 	fileMu                  sync.RWMutex
+	finalizeMu              sync.Mutex
+	finalizeWG              sync.WaitGroup
+	finalizeCount           int
 	monitorMu               sync.Mutex
 	monitorRunning          bool
 	monitorRestartRequested bool
@@ -156,6 +159,7 @@ func (ch *Channel) ExportInfo() *entity.ChannelInfo {
 	}
 
 	return &entity.ChannelInfo{
+		ChannelID:        entity.ChannelID(ch.Config.Site, ch.Config.Username),
 		IsOnline:         ch.IsOnline,
 		IsPaused:         ch.Config.IsPaused,
 		Username:         ch.Config.Username,
@@ -203,6 +207,7 @@ func (ch *Channel) Stop() {
 	ch.monitorMu.Unlock()
 	ch.CancelFunc()
 	ch.waitForMonitorStop()
+	ch.waitForFinalizations()
 
 	ch.Info("channel stopped")
 	ch.stopPublisher()
@@ -314,4 +319,30 @@ func (ch *Channel) waitForMonitorStop() {
 	if done != nil {
 		<-done
 	}
+}
+
+func (ch *Channel) startFinalization() {
+	ch.finalizeMu.Lock()
+	ch.finalizeCount++
+	ch.finalizeWG.Add(1)
+	ch.finalizeMu.Unlock()
+}
+
+func (ch *Channel) finishFinalization() {
+	ch.finalizeMu.Lock()
+	ch.finalizeCount--
+	ch.finalizeMu.Unlock()
+	ch.finalizeWG.Done()
+}
+
+func (ch *Channel) waitForFinalizations() int {
+	ch.finalizeMu.Lock()
+	pending := ch.finalizeCount
+	ch.finalizeMu.Unlock()
+
+	if pending > 0 {
+		ch.Info("waiting for %d recording finalization task(s)", pending)
+		ch.finalizeWG.Wait()
+	}
+	return pending
 }

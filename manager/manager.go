@@ -6,17 +6,19 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"text/template"
 	"time"
 
-	"github.com/r3labs/sse/v2"
 	"github.com/HeapOfChaos/goondvr/channel"
 	"github.com/HeapOfChaos/goondvr/entity"
 	"github.com/HeapOfChaos/goondvr/notifier"
 	"github.com/HeapOfChaos/goondvr/router/view"
 	"github.com/HeapOfChaos/goondvr/server"
+	"github.com/r3labs/sse/v2"
 )
 
 // Manager is responsible for managing channels and their states.
@@ -27,6 +29,18 @@ type Manager struct {
 	startTime  time.Time
 	cfBlocksMu sync.Mutex
 	cfBlocks   map[string]time.Time // username -> last CF block time
+}
+
+type filenamePatternData struct {
+	Username string
+	Site     string
+	Year     string
+	Month    string
+	Day      string
+	Hour     string
+	Minute   string
+	Second   string
+	Sequence int
 }
 
 // New initializes a new Manager instance with an SSE server.
@@ -61,11 +75,20 @@ func New() (*Manager, error) {
 
 // settingsFile is the path to the persisted global settings file.
 const settingsFile = "./conf/settings.json"
+const channelsFile = "./conf/channels.json"
+const legacyDefaultPattern = "videos/{{.Username}}_{{.Year}}-{{.Month}}-{{.Day}}_{{.Hour}}-{{.Minute}}-{{.Second}}{{if .Sequence}}_{{.Sequence}}{{end}}"
+const siteAwareDefaultPattern = "videos/{{if ne .Site \"chaturbate\"}}{{.Site}}/{{end}}{{.Username}}_{{.Year}}-{{.Month}}-{{.Day}}_{{.Hour}}-{{.Minute}}-{{.Second}}{{if .Sequence}}_{{.Sequence}}{{end}}"
 
 // settings holds the subset of global config that can be updated via the web UI.
 type settings struct {
 	Cookies             string `json:"cookies"`
 	UserAgent           string `json:"user_agent"`
+	CompletedDir        string `json:"completed_dir,omitempty"`
+	FinalizeMode        string `json:"finalize_mode,omitempty"`
+	FFmpegEncoder       string `json:"ffmpeg_encoder,omitempty"`
+	FFmpegContainer     string `json:"ffmpeg_container,omitempty"`
+	FFmpegQuality       int    `json:"ffmpeg_quality,omitempty"`
+	FFmpegPreset        string `json:"ffmpeg_preset,omitempty"`
 	NtfyURL             string `json:"ntfy_url,omitempty"`
 	NtfyTopic           string `json:"ntfy_topic,omitempty"`
 	NtfyToken           string `json:"ntfy_token,omitempty"`
@@ -84,6 +107,12 @@ func SaveSettings() error {
 	s := settings{
 		Cookies:             server.Config.Cookies,
 		UserAgent:           server.Config.UserAgent,
+		CompletedDir:        server.Config.CompletedDir,
+		FinalizeMode:        server.Config.FinalizeMode,
+		FFmpegEncoder:       server.Config.FFmpegEncoder,
+		FFmpegContainer:     server.Config.FFmpegContainer,
+		FFmpegQuality:       server.Config.FFmpegQuality,
+		FFmpegPreset:        server.Config.FFmpegPreset,
 		NtfyURL:             server.Config.NtfyURL,
 		NtfyTopic:           server.Config.NtfyTopic,
 		NtfyToken:           server.Config.NtfyToken,
@@ -132,6 +161,12 @@ func LoadSettings() error {
 	server.Config.NtfyURL = s.NtfyURL
 	server.Config.NtfyTopic = s.NtfyTopic
 	server.Config.NtfyToken = s.NtfyToken
+	server.Config.CompletedDir = s.CompletedDir
+	server.Config.FinalizeMode = entity.NormalizeFinalizeMode(s.FinalizeMode)
+	server.Config.FFmpegEncoder = s.FFmpegEncoder
+	server.Config.FFmpegContainer = s.FFmpegContainer
+	server.Config.FFmpegQuality = s.FFmpegQuality
+	server.Config.FFmpegPreset = s.FFmpegPreset
 	server.Config.DiscordWebhookURL = s.DiscordWebhookURL
 	server.Config.NotifyStreamOnline = s.NotifyStreamOnline
 
@@ -158,7 +193,128 @@ func LoadSettings() error {
 	if s.StripchatPDKey != "" {
 		server.Config.StripchatPDKey = s.StripchatPDKey
 	}
+	if server.Config.FFmpegEncoder == "" {
+		server.Config.FFmpegEncoder = "libx264"
+	}
+	if server.Config.FFmpegContainer != "mkv" {
+		server.Config.FFmpegContainer = "mp4"
+	}
+	if server.Config.FFmpegQuality <= 0 {
+		server.Config.FFmpegQuality = 23
+	}
+	if server.Config.FFmpegPreset == "" {
+		server.Config.FFmpegPreset = "medium"
+	}
 	return nil
+}
+
+func renderPatternSample(conf *entity.ChannelConfig) (string, error) {
+	tpl, err := template.New("filename").Parse(conf.Pattern)
+	if err != nil {
+		return "", fmt.Errorf("filename pattern error for %s (%s): %w", conf.Username, conf.Site, err)
+	}
+
+	sampleTime := time.Date(2026, time.January, 2, 15, 4, 5, 0, time.UTC)
+	data := filenamePatternData{
+		Username: conf.Username,
+		Site:     entity.NormalizeSite(conf.Site),
+		Year:     sampleTime.Format("2006"),
+		Month:    sampleTime.Format("01"),
+		Day:      sampleTime.Format("02"),
+		Hour:     sampleTime.Format("15"),
+		Minute:   sampleTime.Format("04"),
+		Second:   sampleTime.Format("05"),
+		Sequence: 0,
+	}
+
+	var buf bytes.Buffer
+	if err := tpl.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("filename pattern error for %s (%s): %w", conf.Username, conf.Site, err)
+	}
+	return filepath.Clean(buf.String()), nil
+}
+
+func detectPatternConflict(conf *entity.ChannelConfig, existing []*entity.ChannelConfig) error {
+	candidatePath, err := renderPatternSample(conf)
+	if err != nil {
+		return err
+	}
+
+	for _, other := range existing {
+		if other == nil {
+			continue
+		}
+		if entity.ChannelID(other.Site, other.Username) == entity.ChannelID(conf.Site, conf.Username) {
+			continue
+		}
+
+		otherPath, err := renderPatternSample(other)
+		if err != nil {
+			return err
+		}
+		if candidatePath == otherPath {
+			return fmt.Errorf(
+				"channel %s (%s) would write to the same output path as %s (%s); update one of the filename patterns to produce distinct paths",
+				conf.Username, conf.Site, other.Username, other.Site,
+			)
+		}
+	}
+
+	return nil
+}
+
+func migrateLegacyPatternConflicts(config []*entity.ChannelConfig) (bool, error) {
+	changed := false
+
+	for {
+		conflictFound := false
+		for i, conf := range config {
+			candidatePath, err := renderPatternSample(conf)
+			if err != nil {
+				return false, err
+			}
+
+			for j := 0; j < i; j++ {
+				other := config[j]
+				if other == nil {
+					continue
+				}
+
+				otherPath, err := renderPatternSample(other)
+				if err != nil {
+					return false, err
+				}
+				if candidatePath != otherPath {
+					continue
+				}
+
+				updated := false
+				if conf.Pattern == legacyDefaultPattern {
+					conf.Pattern = siteAwareDefaultPattern
+					changed = true
+					updated = true
+				}
+				if other.Pattern == legacyDefaultPattern {
+					other.Pattern = siteAwareDefaultPattern
+					changed = true
+					updated = true
+				}
+				if !updated {
+					return changed, nil
+				}
+
+				conflictFound = true
+				break
+			}
+			if conflictFound {
+				break
+			}
+		}
+
+		if !conflictFound {
+			return changed, nil
+		}
+	}
 }
 
 // SaveConfig saves the current channels and state to a JSON file.
@@ -177,7 +333,21 @@ func (m *Manager) SaveConfig() error {
 	if err := os.MkdirAll("./conf", 0700); err != nil {
 		return fmt.Errorf("mkdir all conf: %w", err)
 	}
-	if err := os.WriteFile("./conf/channels.json", b, 0600); err != nil {
+	if err := os.WriteFile(channelsFile, b, 0600); err != nil {
+		return fmt.Errorf("write file: %w", err)
+	}
+	return nil
+}
+
+func saveChannelConfig(config []*entity.ChannelConfig) error {
+	b, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	if err := os.MkdirAll("./conf", 0700); err != nil {
+		return fmt.Errorf("mkdir all conf: %w", err)
+	}
+	if err := os.WriteFile(channelsFile, b, 0600); err != nil {
 		return fmt.Errorf("write file: %w", err)
 	}
 	return nil
@@ -185,7 +355,7 @@ func (m *Manager) SaveConfig() error {
 
 // LoadConfig loads the channels from JSON and starts them.
 func (m *Manager) LoadConfig() error {
-	b, err := os.ReadFile("./conf/channels.json")
+	b, err := os.ReadFile(channelsFile)
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -198,9 +368,36 @@ func (m *Manager) LoadConfig() error {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
 
+	migrated, err := migrateLegacyPatternConflicts(config)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	seen := make(map[string]struct{}, len(config))
+	for i, conf := range config {
+		conf.Sanitize()
+		if conf.Username == "" {
+			return fmt.Errorf("channel at index %d has empty username", i)
+		}
+		channelID := entity.ChannelID(conf.Site, conf.Username)
+		if _, ok := seen[channelID]; ok {
+			return fmt.Errorf("load config: duplicate channel %s (%s)", conf.Username, conf.Site)
+		}
+		seen[channelID] = struct{}{}
+		if err := detectPatternConflict(conf, config[:i]); err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+	}
+
+	if migrated {
+		if err := saveChannelConfig(config); err != nil {
+			return fmt.Errorf("persist migrated config: %w", err)
+		}
+	}
+
 	for i, conf := range config {
 		ch := channel.New(conf)
-		m.Channels.Store(conf.Username, ch)
+		m.Channels.Store(entity.ChannelID(conf.Site, conf.Username), ch)
 
 		if ch.Config.IsPaused {
 			ch.Info("channel was paused, waiting for resume")
@@ -220,13 +417,23 @@ func (m *Manager) CreateChannel(conf *entity.ChannelConfig, shouldSave bool) err
 	}
 
 	// prevent duplicate channels
-	_, ok := m.Channels.Load(conf.Username)
+	channelID := entity.ChannelID(conf.Site, conf.Username)
+	_, ok := m.Channels.Load(channelID)
 	if ok {
-		return fmt.Errorf("channel %s already exists", conf.Username)
+		return fmt.Errorf("channel %s (%s) already exists", conf.Username, conf.Site)
+	}
+
+	var existing []*entity.ChannelConfig
+	m.Channels.Range(func(_, value any) bool {
+		existing = append(existing, value.(*channel.Channel).Config)
+		return true
+	})
+	if err := detectPatternConflict(conf, existing); err != nil {
+		return err
 	}
 
 	ch := channel.New(conf)
-	m.Channels.Store(conf.Username, ch)
+	m.Channels.Store(channelID, ch)
 
 	go ch.Resume(0)
 
@@ -239,13 +446,13 @@ func (m *Manager) CreateChannel(conf *entity.ChannelConfig, shouldSave bool) err
 }
 
 // StopChannel stops the channel.
-func (m *Manager) StopChannel(username string) error {
-	thing, ok := m.Channels.Load(username)
+func (m *Manager) StopChannel(channelID string) error {
+	thing, ok := m.Channels.Load(channelID)
 	if !ok {
 		return nil
 	}
 	thing.(*channel.Channel).Stop()
-	m.Channels.Delete(username)
+	m.Channels.Delete(channelID)
 
 	if err := m.SaveConfig(); err != nil {
 		return fmt.Errorf("save config: %w", err)
@@ -254,8 +461,8 @@ func (m *Manager) StopChannel(username string) error {
 }
 
 // PauseChannel pauses the channel.
-func (m *Manager) PauseChannel(username string) error {
-	thing, ok := m.Channels.Load(username)
+func (m *Manager) PauseChannel(channelID string) error {
+	thing, ok := m.Channels.Load(channelID)
 	if !ok {
 		return nil
 	}
@@ -268,8 +475,8 @@ func (m *Manager) PauseChannel(username string) error {
 }
 
 // ResumeChannel resumes the channel.
-func (m *Manager) ResumeChannel(username string) error {
-	thing, ok := m.Channels.Load(username)
+func (m *Manager) ResumeChannel(channelID string) error {
+	thing, ok := m.Channels.Load(channelID)
 	if !ok {
 		return nil
 	}
@@ -296,8 +503,11 @@ func (m *Manager) ChannelInfo() []*entity.ChannelInfo {
 		if channels[i].IsOnline != channels[j].IsOnline {
 			return channels[i].IsOnline
 		}
-		// Second priority: Alphabetical order by username
-		return strings.ToLower(channels[i].Username) < strings.ToLower(channels[j].Username)
+		// Second priority: Alphabetical order by username, then site.
+		if strings.ToLower(channels[i].Username) != strings.ToLower(channels[j].Username) {
+			return strings.ToLower(channels[i].Username) < strings.ToLower(channels[j].Username)
+		}
+		return strings.ToLower(channels[i].Site) < strings.ToLower(channels[j].Site)
 	})
 
 	return channels
@@ -313,12 +523,12 @@ func (m *Manager) Publish(evt entity.Event, info *entity.ChannelInfo) {
 			return
 		}
 		m.SSE.Publish("updates", &sse.Event{
-			Event: []byte(info.Username + "-info"),
+			Event: []byte(info.ChannelID + "-info"),
 			Data:  b.Bytes(),
 		})
 	case entity.EventLog:
 		m.SSE.Publish("updates", &sse.Event{
-			Event: []byte(info.Username + "-log"),
+			Event: []byte(info.ChannelID + "-log"),
 			Data:  []byte(strings.Join(info.Logs, "\n")),
 		})
 	}
@@ -331,8 +541,8 @@ func (m *Manager) Subscriber(w http.ResponseWriter, r *http.Request) {
 
 // GetChannelThumb returns the current summary card image URL for the given username.
 // Returns an empty string if the channel is not found or has no image.
-func (m *Manager) GetChannelThumb(username string) string {
-	val, ok := m.Channels.Load(username)
+func (m *Manager) GetChannelThumb(channelID string) string {
+	val, ok := m.Channels.Load(channelID)
 	if !ok {
 		return ""
 	}
@@ -342,8 +552,8 @@ func (m *Manager) GetChannelThumb(username string) string {
 // GetChannelLiveThumb returns the live-updating thumbnail URL for the given username.
 // For Stripchat this is the doppiocdn snapshot URL; for Chaturbate it returns empty
 // (the JS handles Chaturbate live thumbs via mmcdn directly).
-func (m *Manager) GetChannelLiveThumb(username string) string {
-	val, ok := m.Channels.Load(username)
+func (m *Manager) GetChannelLiveThumb(channelID string) string {
+	val, ok := m.Channels.Load(channelID)
 	if !ok {
 		return ""
 	}
@@ -351,9 +561,7 @@ func (m *Manager) GetChannelLiveThumb(username string) string {
 }
 
 // Shutdown gracefully stops all active channels, saves config, and waits for
-// in-progress file cleanup and seek-index goroutines to finish.
-// Call this before process exit to ensure recorded files are properly closed
-// and indexed for seeking.
+// any recording finalization tasks to finish before returning.
 func (m *Manager) Shutdown() {
 	m.Channels.Range(func(key, value any) bool {
 		ch := value.(*channel.Channel)
@@ -364,8 +572,6 @@ func (m *Manager) Shutdown() {
 	})
 	// Persist channel list so the web UI restores them on next start.
 	_ = m.SaveConfig()
-	// Give cleanup and BuildSeekIndex goroutines time to complete.
-	time.Sleep(5 * time.Second)
 }
 
 // ReportCFBlock records a CF block for username and fires a global alert if

@@ -50,16 +50,16 @@ Then visit [`http://localhost:8080`](http://localhost:8080) in your browser.
 
 ```bash
 # Windows
-$ windows_amd64_goondvr.exe -u CHANNEL_USERNAME
+$ windows_amd64_goondvr.exe -u CHANNEL_USERNAME --site chaturbate
 
 # macOS (Intel)
-$ ./darwin_amd64_goondvr -u CHANNEL_USERNAME
+$ ./darwin_amd64_goondvr -u CHANNEL_USERNAME --site chaturbate
 
 # macOS (Apple Silicon)
-$ ./darwin_arm64_goondvr -u CHANNEL_USERNAME
+$ ./darwin_arm64_goondvr -u CHANNEL_USERNAME --site chaturbate
 
 # Linux
-$ ./linux_amd64_goondvr -u CHANNEL_USERNAME
+$ ./linux_amd64_goondvr -u CHANNEL_USERNAME --site chaturbate
 ```
 
 This starts recording immediately. The Web UI will be disabled.
@@ -69,6 +69,9 @@ This starts recording immediately. The Web UI will be disabled.
 Pre-built image from [GitHub Container Registry](https://github.com/HeapOfChaos/goondvr/pkgs/container/goondvr):
 
 Persist `./videos` for recordings and `./conf` for saved channels and settings.
+
+By default, closed recordings are moved into a `completed` subdirectory under the recording directory after they are finalized.
+The Docker image built from this repository includes `ffmpeg` so remux/transcode mode works out of the box there.
 
 ```bash
 # Run the container and save videos to ./videos
@@ -111,11 +114,12 @@ Available options:
 
 ```
 --username value, -u value  The username of the channel to record
+--site value                Site to record from: chaturbate or stripchat (default: "chaturbate")
 --admin-username value      Username for web authentication (optional)
 --admin-password value      Password for web authentication (optional)
 --framerate value           Desired framerate (FPS) (default: 30)
 --resolution value          Desired resolution (e.g., 1080 for 1080p) (default: 1080)
---pattern value             Template for naming recorded videos (default: "videos/{{.Username}}_{{.Year}}-{{.Month}}-{{.Day}}_{{.Hour}}-{{.Minute}}-{{.Second}}{{if .Sequence}}_{{.Sequence}}{{end}}")
+--pattern value             Template for naming recorded videos (default: "videos/{{if ne .Site \"chaturbate\"}}{{.Site}}/{{end}}{{.Username}}_{{.Year}}-{{.Month}}-{{.Day}}_{{.Hour}}-{{.Minute}}-{{.Second}}{{if .Sequence}}_{{.Sequence}}{{end}}")
 --max-duration value        Split video into segments every N minutes ('0' to disable) (default: 0)
 --max-filesize value        Split video into segments every N MB ('0' to disable) (default: 0)
 --port value, -p value      Port for the web interface and API (default: "8080")
@@ -124,6 +128,12 @@ Available options:
 --user-agent value          Custom User-Agent for the request
 --stripchat-pdkey value     Manually specify Stripchat pdkey if keys have rotated
 --domain value              Chaturbate domain to use (default: "https://chaturbate.com/")
+--completed-dir value       Directory to move fully closed recordings into (default: <recording dir>/completed)
+--finalize-mode value       Post-process closed recordings: none, remux, or transcode (default: "none")
+--ffmpeg-encoder value      FFmpeg video encoder for transcode mode (default: "libx264")
+--ffmpeg-container value    FFmpeg output container for remux/transcode mode: mp4 or mkv (default: "mp4")
+--ffmpeg-quality value      FFmpeg quality value; CRF for software encoders, CQ/global quality for many hardware encoders (default: 23)
+--ffmpeg-preset value       FFmpeg preset for transcode mode (default: "medium")
 --debug                     Dump full HTML to a temp file when stream detection fails, for diagnosing Cloudflare blocks
 --help, -h                  show help
 --version, -v               print the version
@@ -135,6 +145,9 @@ Available options:
 # Record at 720p / 60fps
 $ ./goondvr -u yamiodymel -resolution 720 -framerate 60
 
+# Record from Stripchat
+$ ./goondvr -u some_model --site stripchat
+
 # Split every 30 minutes
 $ ./goondvr -u yamiodymel -max-duration 30
 
@@ -144,9 +157,34 @@ $ ./goondvr -u yamiodymel -max-filesize 1024
 # Custom filename format
 $ ./goondvr -u yamiodymel \
     -pattern "video/{{.Username}}/{{.Year}}-{{.Month}}-{{.Day}}_{{.Hour}}-{{.Minute}}-{{.Second}}_{{.Sequence}}"
+
+# Move closed recordings to another disk
+$ ./goondvr -u yamiodymel \
+    -completed-dir "/mnt/archive/goondvr-completed"
+
+# Remux finalized recordings with ffmpeg for better seekability
+$ ./goondvr -u yamiodymel \
+    -finalize-mode remux
+
+# Transcode finalized recordings to save space
+$ ./goondvr -u yamiodymel \
+    -finalize-mode transcode \
+    -ffmpeg-encoder libx264 \
+    -ffmpeg-quality 23 \
+    -ffmpeg-preset medium
 ```
 
 _Note: In Web UI mode, these flags serve as default values for new channels._
+
+When the app is stopped with `Ctrl+C` or the container shuts down, it now waits for active recordings to close and for any finalization moves to finish before exiting.
+
+For `remux` and `transcode`, `ffmpeg` must be installed and available on `PATH`. If you choose a hardware encoder such as `h264_nvenc`, `hevc_nvenc`, `h264_qsv`, or `h264_vaapi`, the host and container also need compatible GPU/device access. If FFmpeg or the selected encoder is unavailable, the app keeps the original recording instead of deleting it.
+
+Common encoder examples: `libx264`, `libx265`, `h264_nvenc`, `hevc_nvenc`, `h264_qsv`, `h264_vaapi`.
+
+To prevent file collisions, channels whose filename patterns would resolve to the same output path cannot be added or loaded at the same time. If you record the same username on multiple sites, make sure the pattern includes `{{.Site}}` or otherwise produces distinct paths.
+
+On startup, the app will automatically migrate the old default filename pattern to the newer site-aware default when that is enough to resolve a cross-site filename collision. Custom conflicting patterns are not rewritten automatically and will still need manual adjustment.
 
 # 🍪 Cookies & User-Agent
 
@@ -198,14 +236,14 @@ _Note: Use semicolons to separate multiple cookies, e.g., `key1=value1; key2=val
 
 The format is based on [Go Template Syntax](https://pkg.go.dev/text/template), available variables are:
 
-`{{.Username}}`, `{{.Year}}`, `{{.Month}}`, `{{.Day}}`, `{{.Hour}}`, `{{.Minute}}`, `{{.Second}}`, `{{.Sequence}}`
+`{{.Username}}`, `{{.Site}}`, `{{.Year}}`, `{{.Month}}`, `{{.Day}}`, `{{.Hour}}`, `{{.Minute}}`, `{{.Second}}`, `{{.Sequence}}`
 
 By default, it hides the sequence if it's zero.
 
 ```
-Pattern: {{.Username}}_{{.Year}}-{{.Month}}-{{.Day}}_{{.Hour}}-{{.Minute}}-{{.Second}}{{if .Sequence}}_{{.Sequence}}{{end}}
+Pattern: {{if ne .Site "chaturbate"}}{{.Site}}/{{end}}{{.Username}}_{{.Year}}-{{.Month}}-{{.Day}}_{{.Hour}}-{{.Minute}}-{{.Second}}{{if .Sequence}}_{{.Sequence}}{{end}}
  Output: yamiodymel_2024-01-02_13-45-00.ts    # Sequence won't be shown if it's zero.
- Output: yamiodymel_2024-01-02_13-45-00_1.ts
+ Output: stripchat/yamiodymel_2024-01-02_13-45-00_1.ts
 ```
 
 **👀 or... The sequence can be shown even if it's zero.**

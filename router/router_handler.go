@@ -6,11 +6,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/HeapOfChaos/goondvr/entity"
 	"github.com/HeapOfChaos/goondvr/internal"
 	"github.com/HeapOfChaos/goondvr/manager"
 	"github.com/HeapOfChaos/goondvr/server"
+	"github.com/gin-gonic/gin"
 )
 
 // IndexData represents the data structure for the index page.
@@ -46,11 +46,7 @@ func CreateChannel(c *gin.Context) {
 		return
 	}
 
-	// Normalise site: default to "chaturbate" if empty or unrecognised.
-	siteName := req.Site
-	if siteName != "stripchat" {
-		siteName = "chaturbate"
-	}
+	siteName := entity.NormalizeSite(req.Site)
 
 	var errs []string
 	for _, username := range strings.Split(req.Username, ",") {
@@ -77,21 +73,21 @@ func CreateChannel(c *gin.Context) {
 
 // StopChannel stops a channel.
 func StopChannel(c *gin.Context) {
-	server.Manager.StopChannel(c.Param("username"))
+	server.Manager.StopChannel(c.Param("channelID"))
 
 	c.Redirect(http.StatusFound, "/")
 }
 
 // PauseChannel pauses a channel.
 func PauseChannel(c *gin.Context) {
-	server.Manager.PauseChannel(c.Param("username"))
+	server.Manager.PauseChannel(c.Param("channelID"))
 
 	c.Redirect(http.StatusFound, "/")
 }
 
 // ResumeChannel resumes a paused channel.
 func ResumeChannel(c *gin.Context) {
-	server.Manager.ResumeChannel(c.Param("username"))
+	server.Manager.ResumeChannel(c.Param("channelID"))
 
 	c.Redirect(http.StatusFound, "/")
 }
@@ -99,7 +95,7 @@ func ResumeChannel(c *gin.Context) {
 // ThumbProxy proxies the channel's summary card image from the CDN through the server.
 // This avoids hotlink-protection issues when the browser requests the image directly.
 func ThumbProxy(c *gin.Context) {
-	imgURL := server.Manager.GetChannelThumb(c.Param("username"))
+	imgURL := server.Manager.GetChannelThumb(c.Param("channelID"))
 	if imgURL == "" {
 		c.Status(http.StatusNotFound)
 		return
@@ -120,7 +116,7 @@ func ThumbProxy(c *gin.Context) {
 // For Stripchat this uses img.doppiocdn.net; for Chaturbate it falls back to
 // the summary card image (the JS handles Chaturbate live thumbs directly).
 func LiveThumbProxy(c *gin.Context) {
-	imgURL := server.Manager.GetChannelLiveThumb(c.Param("username"))
+	imgURL := server.Manager.GetChannelLiveThumb(c.Param("channelID"))
 	if imgURL == "" {
 		c.Status(http.StatusNotFound)
 		return
@@ -151,6 +147,12 @@ func Stats(c *gin.Context) {
 type UpdateConfigRequest struct {
 	Cookies             string `form:"cookies"`
 	UserAgent           string `form:"user_agent"`
+	CompletedDir        string `form:"completed_dir"`
+	FinalizeMode        string `form:"finalize_mode"`
+	FFmpegEncoder       string `form:"ffmpeg_encoder"`
+	FFmpegContainer     string `form:"ffmpeg_container"`
+	FFmpegQuality       int    `form:"ffmpeg_quality"`
+	FFmpegPreset        string `form:"ffmpeg_preset"`
 	NtfyURL             string `form:"ntfy_url"`
 	NtfyTopic           string `form:"ntfy_topic"`
 	NtfyToken           string `form:"ntfy_token"`
@@ -173,6 +175,26 @@ func UpdateConfig(c *gin.Context) {
 
 	server.Config.Cookies = req.Cookies
 	server.Config.UserAgent = req.UserAgent
+	server.Config.CompletedDir = req.CompletedDir
+	server.Config.FinalizeMode = entity.NormalizeFinalizeMode(req.FinalizeMode)
+	server.Config.FFmpegEncoder = req.FFmpegEncoder
+	if req.FFmpegContainer == "mkv" {
+		server.Config.FFmpegContainer = "mkv"
+	} else {
+		server.Config.FFmpegContainer = "mp4"
+	}
+	if req.FFmpegQuality > 0 {
+		server.Config.FFmpegQuality = req.FFmpegQuality
+	} else if server.Config.FFmpegQuality <= 0 {
+		server.Config.FFmpegQuality = 23
+	}
+	server.Config.FFmpegPreset = req.FFmpegPreset
+	if server.Config.FFmpegEncoder == "" {
+		server.Config.FFmpegEncoder = "libx264"
+	}
+	if server.Config.FFmpegPreset == "" {
+		server.Config.FFmpegPreset = "medium"
+	}
 	server.Config.NtfyURL = req.NtfyURL
 	server.Config.NtfyTopic = req.NtfyTopic
 	server.Config.NtfyToken = req.NtfyToken

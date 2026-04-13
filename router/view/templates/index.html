@@ -161,7 +161,7 @@
                 {{ range .Channels }}
                 <div class="channel-box ts-box is-horizontal">
                     <!-- Info Section -->
-                    <div sse-swap="{{ .Username }}-info" class="channel-info ts-content is-padded has-break-all" style="width: 400px; line-height: 1.45; padding-right: 0">
+                    <div sse-swap="{{ .ChannelID }}-info" class="channel-info ts-content is-padded has-break-all" style="width: 400px; line-height: 1.45; padding-right: 0">
                         {{ template "channel_info" . }}
                     </div>
                     <!-- / Info Section -->
@@ -169,7 +169,7 @@
                     <!-- Log Section -->
                     <div class="channel-log ts-content is-padded" style="flex: 1; gap: 0.8rem; display: flex; flex-direction: column">
                         <div class="ts-input" style="flex: 1">
-                            <textarea class="has-full-height" readonly sse-swap="{{ .Username }}-log" style="scrollbar-width: thin">{{ range .Logs }}{{ . }}&NewLine;{{ end }}</textarea>
+                            <textarea class="has-full-height" readonly sse-swap="{{ .ChannelID }}-log" style="scrollbar-width: thin">{{ range .Logs }}{{ . }}&NewLine;{{ end }}</textarea>
                         </div>
                         <div>
                             <label class="ts-switch is-small" style="display: flex">
@@ -228,6 +228,78 @@
                             </div>
                         </div>
                         <!-- / User Agent -->
+
+                        <!-- Completed Directory -->
+                        <div class="ts-control is-wide has-top-spaced-large">
+                            <div class="label">Completed Directory</div>
+                            <div class="content">
+                                <div class="ts-input">
+                                    <input type="text" name="completed_dir" value="{{ .Config.CompletedDir }}" placeholder="videos/completed" />
+                                </div>
+                                <div class="ts-text is-description has-top-spaced-small">Closed recordings are moved here after finalization. Leave blank to use a `completed` folder inside the recording directory.</div>
+                            </div>
+                        </div>
+                        <!-- / Completed Directory -->
+
+                        <!-- FFmpeg Finalization -->
+                        <div class="ts-control is-wide has-top-spaced-large">
+                            <div class="label">Recording Finalization</div>
+                            <div class="content">
+                                <div class="ts-content is-padded is-secondary">
+                                    <div class="ts-grid is-relaxed is-2-columns">
+                                        <div class="column">
+                                            <div class="ts-text is-bold">Mode</div>
+                                            <div class="ts-select has-top-spaced-small">
+                                                <select name="finalize_mode">
+                                                    <option value="none" {{ if eq .Config.FinalizeMode "none" }}selected{{ end }}>None</option>
+                                                    <option value="remux" {{ if eq .Config.FinalizeMode "remux" }}selected{{ end }}>Remux</option>
+                                                    <option value="transcode" {{ if eq .Config.FinalizeMode "transcode" }}selected{{ end }}>Transcode</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                        <div class="column">
+                                            <div class="ts-text is-bold">Container</div>
+                                            <div class="ts-select has-top-spaced-small">
+                                                <select name="ffmpeg_container">
+                                                    <option value="mp4" {{ if eq .Config.FFmpegContainer "mp4" }}selected{{ end }}>MP4</option>
+                                                    <option value="mkv" {{ if eq .Config.FFmpegContainer "mkv" }}selected{{ end }}>MKV</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                        <div class="column">
+                                            <div class="ts-text is-bold">Encoder</div>
+                                            <div class="ts-input has-top-spaced-small">
+                                                <input type="text" name="ffmpeg_encoder" value="{{ .Config.FFmpegEncoder }}" placeholder="libx264" list="ffmpeg-encoder-suggestions" />
+                                                <datalist id="ffmpeg-encoder-suggestions">
+                                                    <option value="libx264"></option>
+                                                    <option value="libx265"></option>
+                                                    <option value="h264_nvenc"></option>
+                                                    <option value="hevc_nvenc"></option>
+                                                    <option value="h264_qsv"></option>
+                                                    <option value="h264_vaapi"></option>
+                                                </datalist>
+                                            </div>
+                                            <div class="ts-text is-description has-top-spaced-small">Common values: `libx264`, `libx265`, `h264_nvenc`, `hevc_nvenc`, `h264_qsv`, `h264_vaapi`.</div>
+                                        </div>
+                                        <div class="column">
+                                            <div class="ts-text is-bold">Quality</div>
+                                            <div class="ts-input is-end-labeled has-top-spaced-small">
+                                                <input type="number" name="ffmpeg_quality" value="{{ .Config.FFmpegQuality }}" min="1" />
+                                                <span class="label">CRF/CQ</span>
+                                            </div>
+                                        </div>
+                                        <div class="column">
+                                            <div class="ts-text is-bold">Preset</div>
+                                            <div class="ts-input has-top-spaced-small">
+                                                <input type="text" name="ffmpeg_preset" value="{{ .Config.FFmpegPreset }}" placeholder="medium" />
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="ts-text is-description has-top-spaced">`remux` and `transcode` require `ffmpeg` to be installed. Hardware encoders like `h264_nvenc`, `hevc_nvenc`, `h264_qsv`, and `h264_vaapi` need compatible GPU/device access; if the encoder is unavailable, finalization will fail and the original recording will be kept.</div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- / FFmpeg Finalization -->
 
                         <div class="ts-divider has-vertically-spaced-large"></div>
 
@@ -496,11 +568,11 @@
         <!-- / Create Dialog -->
 
         <script>
-            const LIVE_THUMB_URL = (username, site) => {
-                if (site === 'stripchat') return `/live-thumb/${username}`;
+            const LIVE_THUMB_URL = (username, site, channelID) => {
+                if (site === 'stripchat') return `/live-thumb/${encodeURIComponent(channelID)}`;
                 return `https://thumb.live.mmcdn.com/riw/${username}.jpg`;
             };
-            const CARD_THUMB_URL = username => `/thumb/${username}`;
+            const CARD_THUMB_URL = channelID => `/thumb/${encodeURIComponent(channelID)}`;
             const LIVE_THUMB_CACHE_BUCKET_MS = 60 * 1000;
 
             // Stores the last successfully loaded live URL per username.
@@ -531,6 +603,7 @@
             // refresh=false (SSE re-init) reuses the cached URL to avoid hammering the CDN.
             function applyThumbMode(switcher, mode, refresh) {
                 const username = switcher.dataset.username;
+                const channelID = switcher.dataset.channelId;
                 const site = switcher.dataset.site || 'chaturbate';
                 const hasCard = switcher.dataset.hasCard === '1';
                 const el = switcher.querySelector('.channel-thumb-img');
@@ -538,15 +611,15 @@
                 const effectiveMode = (mode === 'card' && !hasCard) ? 'live' : mode;
                 let src;
                 if (effectiveMode === 'live') {
-                    if (!refresh && liveThumbCache[username]) {
-                        src = liveThumbCache[username];
+                    if (!refresh && liveThumbCache[channelID]) {
+                        src = liveThumbCache[channelID];
                     } else {
                         const cacheBucket = Math.floor(Date.now() / LIVE_THUMB_CACHE_BUCKET_MS);
-                        src = LIVE_THUMB_URL(username, site) + '?' + cacheBucket;
-                        liveThumbCache[username] = src;
+                        src = LIVE_THUMB_URL(username, site, channelID) + '?' + cacheBucket;
+                        liveThumbCache[channelID] = src;
                     }
                 } else {
-                    src = CARD_THUMB_URL(username);
+                    src = CARD_THUMB_URL(channelID);
                 }
                 setThumb(el, src);
                 switcher.querySelectorAll('.img-sw-btn').forEach(btn => {
@@ -612,11 +685,11 @@
             // SSE re-init: reuse cached URLs, no new network requests
             function initThumbSwitchers() {
                 document.querySelectorAll('.img-switcher').forEach(switcher => {
-                    const username = switcher.dataset.username;
+                    const channelID = switcher.dataset.channelId;
                     const isOnline = switcher.dataset.online === 'true';
                     const hasCard = switcher.dataset.hasCard === '1';
                     const defaultMode = isOnline ? 'live' : (hasCard ? 'card' : 'live');
-                    const saved = localStorage.getItem('dvr-thumb-' + username) || defaultMode;
+                    const saved = localStorage.getItem('dvr-thumb-' + channelID) || defaultMode;
                     applyThumbMode(switcher, saved, false);
                 });
             }
@@ -626,21 +699,21 @@
                 const btn = e.target.closest('.img-sw-btn');
                 if (!btn) return;
                 const switcher = btn.closest('.img-switcher');
-                const username = switcher.dataset.username;
+                const channelID = switcher.dataset.channelId;
                 const mode = btn.dataset.mode;
                 applyThumbMode(switcher, mode, true);
-                localStorage.setItem('dvr-thumb-' + username, mode);
+                localStorage.setItem('dvr-thumb-' + channelID, mode);
             });
 
             // 60s interval: force a fresh live thumbnail fetch
             setInterval(function() {
                 if (document.hidden) return;
                 document.querySelectorAll('.img-switcher').forEach(switcher => {
-                    const username = switcher.dataset.username;
+                    const channelID = switcher.dataset.channelId;
                     const isOnline = switcher.dataset.online === 'true';
                     const hasCard = switcher.dataset.hasCard === '1';
                     const defaultMode = isOnline ? 'live' : (hasCard ? 'card' : 'live');
-                    const saved = localStorage.getItem('dvr-thumb-' + username) || defaultMode;
+                    const saved = localStorage.getItem('dvr-thumb-' + channelID) || defaultMode;
                     if (saved === 'live') applyThumbMode(switcher, 'live', true);
                 });
             }, 15000);

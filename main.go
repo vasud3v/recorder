@@ -26,7 +26,7 @@ const logo = `
 func main() {
 	app := &cli.App{
 		Name:    "goondvr",
-		Version: "3.0.5",
+		Version: "3.1.0",
 		Usage:   "Record your favorite streams automatically. 😎🫵",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
@@ -34,6 +34,11 @@ func main() {
 				Aliases: []string{"u"},
 				Usage:   "The username of the channel to record",
 				Value:   "",
+			},
+			&cli.StringFlag{
+				Name:  "site",
+				Usage: "Site to record from: chaturbate or stripchat",
+				Value: "chaturbate",
 			},
 			&cli.StringFlag{
 				Name:  "admin-username",
@@ -58,7 +63,7 @@ func main() {
 			&cli.StringFlag{
 				Name:  "pattern",
 				Usage: "Template for naming recorded videos",
-				Value: "videos/{{.Username}}_{{.Year}}-{{.Month}}-{{.Day}}_{{.Hour}}-{{.Minute}}-{{.Second}}{{if .Sequence}}_{{.Sequence}}{{end}}",
+				Value: "videos/{{if ne .Site \"chaturbate\"}}{{.Site}}/{{end}}{{.Username}}_{{.Year}}-{{.Month}}-{{.Day}}_{{.Hour}}-{{.Minute}}-{{.Second}}{{if .Sequence}}_{{.Sequence}}{{end}}",
 			},
 			&cli.IntFlag{
 				Name:  "max-duration",
@@ -95,6 +100,36 @@ func main() {
 				Name:  "domain",
 				Usage: "Chaturbate domain to use",
 				Value: "https://chaturbate.com/",
+			},
+			&cli.StringFlag{
+				Name:  "completed-dir",
+				Usage: "Directory to move fully closed recordings into (default: <recording dir>/completed)",
+				Value: "",
+			},
+			&cli.StringFlag{
+				Name:  "finalize-mode",
+				Usage: "Post-process closed recordings: none, remux, or transcode",
+				Value: "none",
+			},
+			&cli.StringFlag{
+				Name:  "ffmpeg-encoder",
+				Usage: "FFmpeg video encoder for transcode mode (e.g. libx264, libx265, h264_nvenc)",
+				Value: "libx264",
+			},
+			&cli.StringFlag{
+				Name:  "ffmpeg-container",
+				Usage: "FFmpeg output container for remux/transcode mode (mp4 or mkv)",
+				Value: "mp4",
+			},
+			&cli.IntFlag{
+				Name:  "ffmpeg-quality",
+				Usage: "FFmpeg quality value (CRF for software encoders, CQ for many hardware encoders)",
+				Value: 23,
+			},
+			&cli.StringFlag{
+				Name:  "ffmpeg-preset",
+				Usage: "FFmpeg preset for transcode mode",
+				Value: "medium",
 			},
 			&cli.BoolFlag{
 				Name:  "debug",
@@ -136,7 +171,7 @@ func start(c *cli.Context) error {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
-		fmt.Println("Shutting down, waiting for recordings to close...")
+		fmt.Println("Shutting down, waiting for recordings to close and finalize...")
 		server.Manager.Shutdown()
 		os.Exit(0)
 	}()
@@ -156,6 +191,7 @@ func start(c *cli.Context) error {
 	if err := server.Manager.CreateChannel(&entity.ChannelConfig{
 		IsPaused:    false,
 		Username:    c.String("username"),
+		Site:        server.Config.Site,
 		Framerate:   c.Int("framerate"),
 		Resolution:  c.Int("resolution"),
 		Pattern:     c.String("pattern"),

@@ -6,19 +6,24 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/HeapOfChaos/goondvr/chaturbate"
+	"github.com/HeapOfChaos/goondvr/server"
 )
 
 // Pattern holds the date/time and sequence information for the filename pattern
 type Pattern struct {
 	Username string
+	Site     string
 	Year     string
 	Month    string
 	Day      string
@@ -87,18 +92,12 @@ func (ch *Channel) cleanupLocked() error {
 		if err := os.Remove(filename); err != nil {
 			return fmt.Errorf("remove zero file: %w", err)
 		}
-	} else if fileInfo != nil && strings.HasSuffix(filename, ".mp4") {
-		// Append mfra seek index so players like VLC can seek instantly.
-		// Run in background so it does not block the recording of the next file.
-		go func() {
-			if err := chaturbate.BuildSeekIndex(filename); err != nil {
-				log.Printf("WARN  seek index %s: %v", filename, err)
-			}
-		}()
+		go ch.ScanTotalDiskUsage()
+	} else if fileInfo != nil {
+		ch.startFinalization()
+		go ch.finalizeRecording(filename)
 	}
 
-	// Rescan total disk usage after a file is closed so the UI stays current.
-	go ch.ScanTotalDiskUsage()
 	return nil
 }
 
@@ -123,6 +122,7 @@ func (ch *Channel) generateFilenameLocked() (string, error) {
 	t := time.Unix(ch.StreamedAt, 0)
 	pattern := &Pattern{
 		Username: ch.Config.Username,
+		Site:     ch.Config.Site,
 		Sequence: ch.Sequence,
 		Year:     t.Format("2006"),
 		Month:    t.Format("01"),
@@ -177,24 +177,56 @@ func recordingDirFromPattern(pattern string) string {
 	return dir
 }
 
+func completedDirForChannel(ch *Channel) string {
+	if server.Config.CompletedDir != "" {
+		return server.Config.CompletedDir
+	}
+	return filepath.Join(recordingDirFromPattern(ch.Config.Pattern), "completed")
+}
+
+func finalOutputExt(filename string) string {
+	if server.Config.FFmpegContainer == "mkv" {
+		return ".mkv"
+	}
+	if server.Config.FinalizeMode == "none" {
+		return filepath.Ext(filename)
+	}
+	return ".mp4"
+}
+
+func finalOutputPath(filename string) string {
+	base := strings.TrimSuffix(filename, filepath.Ext(filename))
+	return base + finalOutputExt(filename)
+}
+
 // ScanTotalDiskUsage calculates the total bytes of all recordings for this channel
 // by walking the recording directory for files whose name starts with the username.
 // The result is stored in TotalDiskUsageBytes.
 func (ch *Channel) ScanTotalDiskUsage() {
-	dir := recordingDirFromPattern(ch.Config.Pattern)
+	recordingDir := filepath.Clean(recordingDirFromPattern(ch.Config.Pattern))
+	dirs := []string{recordingDir}
+	completedDir := completedDirForChannel(ch)
+	cleanCompletedDir := filepath.Clean(completedDir)
+	if cleanCompletedDir != "" &&
+		cleanCompletedDir != recordingDir &&
+		!strings.HasPrefix(cleanCompletedDir+string(os.PathSeparator), recordingDir+string(os.PathSeparator)) {
+		dirs = append(dirs, completedDir)
+	}
 	prefix := ch.Config.Username
 	var total int64
-	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		if strings.HasPrefix(filepath.Base(path), prefix) {
-			if info, err2 := d.Info(); err2 == nil {
-				total += info.Size()
+	for _, dir := range dirs {
+		_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
 			}
-		}
-		return nil
-	})
+			if strings.HasPrefix(filepath.Base(path), prefix) {
+				if info, err2 := d.Info(); err2 == nil {
+					total += info.Size()
+				}
+			}
+			return nil
+		})
+	}
 	ch.fileMu.Lock()
 	ch.TotalDiskUsageBytes = total
 	ch.fileMu.Unlock()
@@ -240,4 +272,185 @@ func isMP4InitSegment(b []byte) bool {
 	}
 
 	return hasFtyp && hasMoov
+}
+
+func (ch *Channel) finalizeRecording(filename string) {
+	defer ch.finishFinalization()
+
+	finalPath := filename
+	if server.Config.FinalizeMode == "none" {
+		if strings.HasSuffix(filename, ".mp4") {
+			if err := chaturbate.BuildSeekIndex(filename); err != nil {
+				log.Printf("WARN  seek index %s: %v", filename, err)
+			}
+		}
+	} else {
+		processedPath, err := ch.runFFmpegFinalizer(filename)
+		if err != nil {
+			ch.Error("ffmpeg %s failed for `%s`: %s", server.Config.FinalizeMode, filename, err.Error())
+			ch.Info("keeping original recording because finalization failed")
+		} else {
+			if processedPath != filename {
+				if err := os.Remove(filename); err != nil {
+					ch.Error("remove original after ffmpeg finalization `%s`: %s", filename, err.Error())
+				}
+			}
+			finalPath = processedPath
+		}
+	}
+
+	completedDir := completedDirForChannel(ch)
+	if completedDir != "" {
+		dst, err := moveRecordingToDir(finalPath, recordingDirFromPattern(ch.Config.Pattern), completedDir)
+		if err != nil {
+			ch.Error("move completed recording `%s`: %s", finalPath, err.Error())
+		} else {
+			ch.Info("completed recording moved to `%s`", dst)
+		}
+	}
+
+	go ch.ScanTotalDiskUsage()
+}
+
+func moveRecordingToDir(src, recordingRoot, completedDir string) (string, error) {
+	dstDir := completedDir
+
+	srcDir := filepath.Dir(src)
+	cleanRoot := filepath.Clean(recordingRoot)
+	cleanSrcDir := filepath.Clean(srcDir)
+	if relDir, err := filepath.Rel(cleanRoot, cleanSrcDir); err == nil && relDir != ".." && !strings.HasPrefix(relDir, ".."+string(os.PathSeparator)) {
+		if relDir != "." {
+			dstDir = filepath.Join(completedDir, relDir)
+		}
+	}
+
+	if err := os.MkdirAll(dstDir, 0755); err != nil {
+		return "", fmt.Errorf("mkdir completed dir: %w", err)
+	}
+
+	dst := filepath.Join(dstDir, filepath.Base(src))
+	if src == dst {
+		return dst, nil
+	}
+
+	if err := os.Rename(src, dst); err == nil {
+		return dst, nil
+	} else if !isCrossDeviceRename(err) {
+		return "", fmt.Errorf("rename completed file: %w", err)
+	}
+
+	if err := copyFile(src, dst); err != nil {
+		return "", err
+	}
+	if err := os.Remove(src); err != nil {
+		return "", fmt.Errorf("remove source after copy: %w", err)
+	}
+	return dst, nil
+}
+
+func isCrossDeviceRename(err error) bool {
+	linkErr := &os.LinkError{}
+	return errors.As(err, &linkErr) && errors.Is(linkErr.Err, syscall.EXDEV)
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open source file: %w", err)
+	}
+	defer in.Close()
+
+	info, err := in.Stat()
+	if err != nil {
+		return fmt.Errorf("stat source file: %w", err)
+	}
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode())
+	if err != nil {
+		return fmt.Errorf("create destination file: %w", err)
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return fmt.Errorf("copy file: %w", err)
+	}
+	if err := out.Sync(); err != nil {
+		return fmt.Errorf("sync destination file: %w", err)
+	}
+	return nil
+}
+
+func (ch *Channel) runFFmpegFinalizer(filename string) (string, error) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return "", fmt.Errorf("ffmpeg not found in PATH")
+	}
+
+	outExt := finalOutputExt(filename)
+	finalPath := finalOutputPath(filename)
+	tempOutput := strings.TrimSuffix(filename, filepath.Ext(filename)) + ".finalizing" + outExt
+	_ = os.Remove(tempOutput)
+
+	args := []string{"-nostdin", "-y", "-i", filename}
+	switch server.Config.FinalizeMode {
+	case "remux":
+		args = append(args, "-c", "copy")
+		if outExt == ".mp4" {
+			args = append(args, "-movflags", "+faststart")
+		}
+	case "transcode":
+		encoder := strings.TrimSpace(server.Config.FFmpegEncoder)
+		if encoder == "" {
+			encoder = "libx264"
+		}
+		args = append(args, "-c:v", encoder)
+		args = append(args, qualityArgsForEncoder(encoder, server.Config.FFmpegQuality)...)
+		if preset := strings.TrimSpace(server.Config.FFmpegPreset); preset != "" {
+			args = append(args, "-preset", preset)
+		}
+		args = append(args, "-c:a", "copy")
+		if outExt == ".mp4" {
+			args = append(args, "-movflags", "+faststart")
+		}
+	default:
+		return "", fmt.Errorf("unsupported finalization mode %q", server.Config.FinalizeMode)
+	}
+	args = append(args, tempOutput)
+
+	ch.Info("running ffmpeg %s for `%s`", server.Config.FinalizeMode, filepath.Base(filename))
+	cmd := exec.Command("ffmpeg", args...)
+	outputBytes, err := cmd.CombinedOutput()
+	if err != nil {
+		_ = os.Remove(tempOutput)
+		msg := strings.TrimSpace(string(outputBytes))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", fmt.Errorf("%s", msg)
+	}
+	if finalPath == filename {
+		if err := os.Remove(filename); err != nil && !os.IsNotExist(err) {
+			_ = os.Remove(tempOutput)
+			return "", fmt.Errorf("remove original before replace: %w", err)
+		}
+	}
+	if err := os.Rename(tempOutput, finalPath); err != nil {
+		_ = os.Remove(tempOutput)
+		return "", fmt.Errorf("rename finalized output: %w", err)
+	}
+	return finalPath, nil
+}
+
+func qualityArgsForEncoder(encoder string, quality int) []string {
+	if quality <= 0 {
+		quality = 23
+	}
+	lower := strings.ToLower(strings.TrimSpace(encoder))
+	switch {
+	case strings.Contains(lower, "nvenc"):
+		return []string{"-cq", fmt.Sprintf("%d", quality)}
+	case strings.Contains(lower, "qsv"), strings.Contains(lower, "vaapi"), strings.Contains(lower, "amf"):
+		return []string{"-global_quality", fmt.Sprintf("%d", quality)}
+	default:
+		return []string{"-crf", fmt.Sprintf("%d", quality)}
+	}
 }

@@ -7,7 +7,7 @@ COPY ./ ./
 RUN go build -ldflags="-s -w" -o goondvr .
 
 FROM alpine:3 AS runnable
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates ffmpeg
 WORKDIR /usr/src/app
 
 COPY --from=builder /workspace/goondvr /goondvr

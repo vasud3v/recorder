@@ -62,6 +62,15 @@ func CreateTransport() *http.Transport {
 	newTransport.TLSClientConfig = &tls.Config{
 		InsecureSkipVerify: true,
 	}
+	// Increase timeouts and connection limits for better reliability
+	newTransport.MaxIdleConns = 100
+	newTransport.MaxIdleConnsPerHost = 100
+	newTransport.IdleConnTimeout = 90 * time.Second
+	newTransport.TLSHandshakeTimeout = 10 * time.Second
+	newTransport.ExpectContinueTimeout = 1 * time.Second
+	newTransport.ResponseHeaderTimeout = 10 * time.Second
+	newTransport.DisableKeepAlives = false
+	
 	return newTransport
 }
 
@@ -129,7 +138,7 @@ func (h *Req) GetBytes(ctx context.Context, url string) ([]byte, error) {
 
 // CreateRequest constructs an HTTP GET request with necessary headers.
 func (h *Req) CreateRequest(ctx context.Context, url string) (*http.Request, context.CancelFunc, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second) // timed out after 10 seconds
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second) // increased timeout to 30 seconds
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {

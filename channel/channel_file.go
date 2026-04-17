@@ -17,7 +17,9 @@ import (
 	"time"
 
 	"github.com/HeapOfChaos/goondvr/chaturbate"
+	"github.com/HeapOfChaos/goondvr/database"
 	"github.com/HeapOfChaos/goondvr/server"
+	"github.com/HeapOfChaos/goondvr/uploader"
 )
 
 // Pattern holds the date/time and sequence information for the filename pattern
@@ -296,6 +298,107 @@ func (ch *Channel) finalizeRecording(filename string) {
 				}
 			}
 			finalPath = processedPath
+		}
+	}
+
+	// Upload to GoFile if enabled
+	if server.Config.EnableGoFileUpload {
+		ch.Info("uploading `%s` to GoFile...", filepath.Base(finalPath))
+		
+		gofileUploader := uploader.NewGoFileUploader()
+		uploadStart := time.Now()
+		downloadLink, err := gofileUploader.Upload(finalPath)
+		uploadDuration := time.Since(uploadStart).Seconds()
+		
+		if err != nil {
+			ch.Error("gofile upload failed for `%s`: %s", finalPath, err.Error())
+			ch.Info("keeping local file because upload failed")
+			
+			// Log failed upload to database
+			db := database.GetDB()
+			fileInfo, _ := os.Stat(finalPath)
+			filesize := int64(0)
+			if fileInfo != nil {
+				filesize = fileInfo.Size()
+			}
+			
+			_ = db.AddRecord(database.VideoRecord{
+				ID:             fmt.Sprintf("%s_%d", ch.Config.Username, time.Now().Unix()),
+				Username:       ch.Config.Username,
+				Site:           ch.Config.Site,
+				ChannelID:      fmt.Sprintf("%s__%s", ch.Config.Site, ch.Config.Username),
+				Filename:       filepath.Base(finalPath),
+				OriginalPath:   finalPath,
+				UploadedAt:     time.Now(),
+				RecordedAt:     time.Unix(ch.StreamedAt, 0),
+				GoFileLink:     "",
+				Duration:       ch.Duration,
+				FilesizeBytes:  filesize,
+				Resolution:     ch.Config.Resolution,
+				Framerate:      ch.Config.Framerate,
+				RoomTitle:      ch.RoomTitle,
+				Gender:         ch.Gender,
+				UploadDuration: uploadDuration,
+				UploadSpeed:    0,
+				Status:         "failed",
+				ErrorMessage:   err.Error(),
+			})
+		} else {
+			ch.Info("upload successful: %s", downloadLink)
+			
+			// Get file info for database record
+			fileInfo, _ := os.Stat(finalPath)
+			filesize := int64(0)
+			uploadSpeed := 0.0
+			if fileInfo != nil {
+				filesize = fileInfo.Size()
+				if uploadDuration > 0 {
+					uploadSpeed = float64(filesize) / uploadDuration / 1024 / 1024 // MB/s
+				}
+			}
+			
+			// Store in database
+			db := database.GetDB()
+			record := database.VideoRecord{
+				ID:             fmt.Sprintf("%s_%d", ch.Config.Username, time.Now().Unix()),
+				Username:       ch.Config.Username,
+				Site:           ch.Config.Site,
+				ChannelID:      fmt.Sprintf("%s__%s", ch.Config.Site, ch.Config.Username),
+				Filename:       filepath.Base(finalPath),
+				OriginalPath:   finalPath,
+				UploadedAt:     time.Now(),
+				RecordedAt:     time.Unix(ch.StreamedAt, 0),
+				GoFileLink:     downloadLink,
+				Duration:       ch.Duration,
+				FilesizeBytes:  filesize,
+				Resolution:     ch.Config.Resolution,
+				Framerate:      ch.Config.Framerate,
+				RoomTitle:      ch.RoomTitle,
+				Gender:         ch.Gender,
+				UploadDuration: uploadDuration,
+				UploadSpeed:    uploadSpeed,
+				Status:         "uploaded",
+			}
+			
+			if err := db.AddRecord(record); err != nil {
+				ch.Error("failed to save record to database: %s", err.Error())
+			} else {
+				ch.Info("video record saved to database")
+				// Create backup every 10 uploads
+				if len(db.GetRecords()) % 10 == 0 {
+					_ = db.Backup()
+				}
+			}
+			
+			// Delete local file after successful upload
+			if err := os.Remove(finalPath); err != nil {
+				ch.Error("failed to delete local file `%s`: %s", finalPath, err.Error())
+			} else {
+				ch.Info("local file deleted: `%s`", filepath.Base(finalPath))
+			}
+			
+			go ch.ScanTotalDiskUsage()
+			return
 		}
 	}
 

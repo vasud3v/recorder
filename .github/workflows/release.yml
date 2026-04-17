@@ -1,54 +1,55 @@
-name: Release
+name: GoondVR
 
 on:
   push:
     tags:
       - "v*"
+    branches:
+      - main
+    paths:
+      - '.github/channels.json'
+  schedule:
+    - cron: '0 */5 * * *'
+  workflow_dispatch:
 
 jobs:
-  build:
-    name: Build and release
+  # Release job - only runs on tags
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write
       packages: write
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-
+      
       - name: Build binaries
         run: |
           mkdir -p dist
-
           GOOS=linux   GOARCH=amd64  go build -ldflags="-s -w" -o dist/linux_amd64_goondvr .
           GOOS=windows GOARCH=amd64  go build -ldflags="-s -w" -o dist/windows_amd64_goondvr.exe .
           GOOS=darwin  GOARCH=amd64  go build -ldflags="-s -w" -o dist/darwin_amd64_goondvr .
           GOOS=darwin  GOARCH=arm64  go build -ldflags="-s -w" -o dist/darwin_arm64_goondvr .
-
+      
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+      
+      - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+      
+      - uses: docker/setup-buildx-action@v3
+      
+      - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
@@ -56,3 +57,121 @@ jobs:
           tags: |
             ghcr.io/heapofchaos/goondvr:latest
             ghcr.io/heapofchaos/goondvr:${{ github.ref_name }}
+
+  # Load channels for recording
+  setup:
+    if: "!startsWith(github.ref, 'refs/tags/')"
+    runs-on: ubuntu-latest
+    outputs:
+      channels: ${{ steps.load.outputs.channels }}
+      has-channels: ${{ steps.load.outputs.has-channels }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: load
+        run: |
+          if [ ! -f .github/channels.json ]; then
+            echo "channels=[]" >> $GITHUB_OUTPUT
+            echo "has-channels=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          CHANNELS=$(cat .github/channels.json | jq -c '.channels')
+          if [ "$CHANNELS" = "[]" ] || [ "$CHANNELS" = "null" ]; then
+            echo "channels=[]" >> $GITHUB_OUTPUT
+            echo "has-channels=false" >> $GITHUB_OUTPUT
+          else
+            echo "channels=$CHANNELS" >> $GITHUB_OUTPUT
+            echo "has-channels=true" >> $GITHUB_OUTPUT
+          fi
+
+  # Record all channels in parallel (24/7)
+  record:
+    if: "!startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true'"
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      matrix:
+        channel: ${{ fromJson(needs.setup.outputs.channels) }}
+      fail-fast: false
+      max-parallel: 20
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      
+      - name: Build
+        run: go build -o goondvr .
+      
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            conf/
+            database/
+          key: state-${{ matrix.channel.username }}-${{ github.run_id }}
+          restore-keys: state-${{ matrix.channel.username }}-
+      
+      - name: Record
+        env:
+          COOKIES: ${{ secrets.CHATURBATE_COOKIES }}
+          USER_AGENT: ${{ secrets.USER_AGENT }}
+        run: |
+          mkdir -p videos conf database/backups
+          timeout 5h ./goondvr \
+            -u "${{ matrix.channel.username }}" \
+            --site "${{ matrix.channel.site }}" \
+            -resolution 9999 \
+            -framerate 60 \
+            -interval 1 \
+            -max-duration 0 \
+            -max-filesize 0 \
+            --enable-gofile-upload \
+            --finalize-mode remux \
+            --ffmpeg-container mp4 \
+            ${COOKIES:+-cookies "$COOKIES"} \
+            ${USER_AGENT:+-user-agent "$USER_AGENT"} || true
+      
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: |
+            conf/
+            database/
+          key: state-${{ matrix.channel.username }}-${{ github.run_id }}
+      
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: db-${{ matrix.channel.username }}-${{ github.run_number }}
+          path: database/
+          retention-days: 30
+          if-no-files-found: ignore
+
+  # Auto-restart for 24/7
+  restart:
+    if: "!startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true'"
+    needs: [setup, record]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait before restart
+        run: sleep 30
+      
+      - uses: actions/github-script@v7
+        continue-on-error: true
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'release.yml',
+                ref: context.ref.replace('refs/heads/', '')
+              });
+            } catch (error) {
+              console.log('Failed to trigger restart:', error.message);
+            }

@@ -1,0 +1,22 @@
+[
+  {
+    "id": "test_1776398392",
+    "username": "testuser",
+    "site": "chaturbate",
+    "channel_id": "chaturbate__testuser",
+    "filename": "testuser_2026-04-17_10-00-00.mp4",
+    "original_path": "./videos/testuser_2026-04-17_10-00-00.mp4",
+    "uploaded_at": "2026-04-17T09:29:52.2278008+05:30",
+    "recorded_at": "2026-04-17T08:29:52.2278008+05:30",
+    "gofile_link": "https://gofile.io/d/test123",
+    "duration": 1234.5,
+    "filesize_bytes": 104857600,
+    "resolution": 1080,
+    "framerate": 30,
+    "room_title": "Test Room",
+    "gender": "f",
+    "upload_duration": 25.5,
+    "upload_speed": 3.92,
+    "status": "uploaded"
+  }
+]

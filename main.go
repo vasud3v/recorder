@@ -141,6 +141,11 @@ func main() {
 				Usage: "Stripchat MOUFLON v2 decryption key (auto-extracted if omitted)",
 				Value: "",
 			},
+			&cli.BoolFlag{
+				Name:  "enable-gofile-upload",
+				Usage: "Enable automatic upload to GoFile.io after recording (deletes local file after upload)",
+				Value: false,
+			},
 		},
 		Action: start,
 	}

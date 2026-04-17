@@ -184,8 +184,16 @@ func (h *Req) SetRequestHeaders(req *http.Request) {
 		// Do NOT send it to CDN media hosts (mmcdn.com) as it may cause rejection.
 		req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	}
-	if server.Config.UserAgent != "" {
-		req.Header.Set("User-Agent", server.Config.UserAgent)
+	// Set User-Agent with default fallback
+	userAgent := server.Config.UserAgent
+	if userAgent == "" {
+		userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	}
+	// Clean the user agent string to remove any invalid characters
+	userAgent = strings.TrimSpace(strings.ReplaceAll(userAgent, "\n", ""))
+	userAgent = strings.ReplaceAll(userAgent, "\r", "")
+	if userAgent != "" {
+		req.Header.Set("User-Agent", userAgent)
 	}
 	if server.Config.Cookies != "" {
 		cookies := ParseCookies(server.Config.Cookies)

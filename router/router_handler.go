@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/HeapOfChaos/goondvr/database"
 	"github.com/HeapOfChaos/goondvr/entity"
 	"github.com/HeapOfChaos/goondvr/internal"
 	"github.com/HeapOfChaos/goondvr/manager"
@@ -163,6 +164,7 @@ type UpdateConfigRequest struct {
 	CFGlobalThreshold   int    `form:"cf_global_threshold"`
 	NotifyCooldownHours int    `form:"notify_cooldown_hours"`
 	NotifyStreamOnline  bool   `form:"notify_stream_online"`
+	EnableGoFileUpload  bool   `form:"enable_gofile_upload"`
 }
 
 // UpdateConfig updates the server configuration.
@@ -205,10 +207,76 @@ func UpdateConfig(c *gin.Context) {
 	server.Config.CFGlobalThreshold = req.CFGlobalThreshold
 	server.Config.NotifyCooldownHours = req.NotifyCooldownHours
 	server.Config.NotifyStreamOnline = req.NotifyStreamOnline
+	server.Config.EnableGoFileUpload = req.EnableGoFileUpload
 
 	if err := manager.SaveSettings(); err != nil {
 		c.AbortWithError(http.StatusInternalServerError, fmt.Errorf("save settings: %w", err))
 		return
 	}
 	c.Redirect(http.StatusFound, "/")
+}
+
+// GetVideos returns all uploaded video records as JSON
+func GetVideos(c *gin.Context) {
+	db := database.GetDB()
+	records := db.GetRecords()
+	c.JSON(http.StatusOK, records)
+}
+
+// GetVideosByUsername returns all uploaded video records for a specific username
+func GetVideosByUsername(c *gin.Context) {
+	username := c.Param("username")
+	db := database.GetDB()
+	records := db.GetRecordsByUsername(username)
+	c.JSON(http.StatusOK, records)
+}
+
+// GetVideosBySite returns all uploaded video records for a specific site
+func GetVideosBySite(c *gin.Context) {
+	site := c.Param("site")
+	db := database.GetDB()
+	records := db.GetRecordsBySite(site)
+	c.JSON(http.StatusOK, records)
+}
+
+// GetVideoByID returns a specific video record by ID
+func GetVideoByID(c *gin.Context) {
+	id := c.Param("id")
+	db := database.GetDB()
+	record, err := db.GetRecordByID(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, record)
+}
+
+// GetDatabaseStats returns database statistics
+func GetDatabaseStats(c *gin.Context) {
+	db := database.GetDB()
+	stats := db.GetStats()
+	c.JSON(http.StatusOK, stats)
+}
+
+// SearchVideos searches videos by query string
+func SearchVideos(c *gin.Context) {
+	query := c.Query("q")
+	if query == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "query parameter 'q' is required"})
+		return
+	}
+	
+	db := database.GetDB()
+	records := db.Search(query)
+	c.JSON(http.StatusOK, records)
+}
+
+// BackupDatabase creates a backup of the database
+func BackupDatabase(c *gin.Context) {
+	db := database.GetDB()
+	if err := db.Backup(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "backup created successfully"})
 }

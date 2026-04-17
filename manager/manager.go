@@ -100,6 +100,7 @@ type settings struct {
 	NotifyCooldownHours int    `json:"notify_cooldown_hours,omitempty"`
 	NotifyStreamOnline  bool   `json:"notify_stream_online,omitempty"`
 	StripchatPDKey      string `json:"stripchat_pdkey,omitempty"`
+	EnableGoFileUpload  bool   `json:"enable_gofile_upload,omitempty"`
 }
 
 // SaveSettings persists the current cookies and user-agent to disk.
@@ -124,6 +125,7 @@ func SaveSettings() error {
 		NotifyCooldownHours: server.Config.NotifyCooldownHours,
 		NotifyStreamOnline:  server.Config.NotifyStreamOnline,
 		StripchatPDKey:      server.Config.StripchatPDKey,
+		EnableGoFileUpload:  server.Config.EnableGoFileUpload,
 	}
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
@@ -193,6 +195,7 @@ func LoadSettings() error {
 	if s.StripchatPDKey != "" {
 		server.Config.StripchatPDKey = s.StripchatPDKey
 	}
+	server.Config.EnableGoFileUpload = s.EnableGoFileUpload
 	if server.Config.FFmpegEncoder == "" {
 		server.Config.FFmpegEncoder = "libx264"
 	}

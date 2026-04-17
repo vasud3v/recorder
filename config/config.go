@@ -31,5 +31,6 @@ func New(c *cli.Context) (*entity.Config, error) {
 		FFmpegPreset:    c.String("ffmpeg-preset"),
 		Debug:           c.Bool("debug"),
 		StripchatPDKey:  c.String("stripchat-pdkey"),
+		EnableGoFileUpload: c.Bool("enable-gofile-upload"),
 	}, nil
 }

@@ -129,4 +129,7 @@ type Config struct {
 	NotifyCooldownHours int // hours between repeated alerts of the same type; default 4
 	NotifyStreamOnline  bool
 	StripchatPDKey      string // MOUFLON v2 decryption key; auto-extracted or manual override
+	
+	// GoFile upload settings
+	EnableGoFileUpload bool // enable automatic upload to GoFile after recording
 }

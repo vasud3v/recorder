@@ -11,6 +11,7 @@ Features added in this version include:
 - Live stream thumbnails for streaming channels and previews for offline channels
 - Stripchat support
 - Discord webhook and `ntfy` notifications
+- **GoFile.io automatic upload** - Upload recordings to GoFile and delete local files to save space
 
 Example dashboard and settings views from the current web UI.
 
@@ -134,6 +135,7 @@ Available options:
 --ffmpeg-container value    FFmpeg output container for remux/transcode mode: mp4 or mkv (default: "mp4")
 --ffmpeg-quality value      FFmpeg quality value; CRF for software encoders, CQ/global quality for many hardware encoders (default: 23)
 --ffmpeg-preset value       FFmpeg preset for transcode mode (default: "medium")
+--enable-gofile-upload      Enable automatic upload to GoFile.io after recording (deletes local file after upload)
 --debug                     Dump full HTML to a temp file when stream detection fails, for diagnosing Cloudflare blocks
 --help, -h                  show help
 --version, -v               print the version
@@ -172,6 +174,10 @@ $ ./goondvr -u yamiodymel \
     -ffmpeg-encoder libx264 \
     -ffmpeg-quality 23 \
     -ffmpeg-preset medium
+
+# Upload recordings to GoFile.io and delete local files
+$ ./goondvr -u yamiodymel \
+    --enable-gofile-upload
 ```
 
 _Note: In Web UI mode, these flags serve as default values for new channels._
@@ -231,6 +237,36 @@ _Note: Use semicolons to separate multiple cookies, e.g., `key1=value1; key2=val
     ```bash
     $ ./goondvr -u yamiodymel -cookies "sessionid=PASTE_YOUR_SESSIONID_HERE"
     ```
+
+# 📤 GoFile Upload
+
+Automatically upload completed recordings to GoFile.io and delete local files to save disk space. The download links are stored in a database for later access.
+
+**Enable via CLI:**
+
+```bash
+$ ./goondvr -u yamiodymel --enable-gofile-upload
+```
+
+**Enable via Web UI:**
+
+1. Open Settings
+2. Check "Enable GoFile Upload"
+3. Save
+
+**API Endpoints:**
+
+```bash
+# Get all uploaded videos
+$ curl http://localhost:8080/api/videos
+
+# Get videos for specific user
+$ curl http://localhost:8080/api/videos/username
+```
+
+**Database Location:** `./conf/videos.json`
+
+For detailed documentation, see [GOFILE_UPLOAD.md](GOFILE_UPLOAD.md).
 
 # 📄 Filename Pattern
 

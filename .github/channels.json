@@ -1,0 +1,12 @@
+{
+  "channels": [
+    {
+      "username": "example_streamer1",
+      "site": "chaturbate"
+    },
+    {
+      "username": "example_streamer2",
+      "site": "stripchat"
+    }
+  ]
+}

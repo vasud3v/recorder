@@ -1,29 +1,40 @@
 # =============================================================================
 # GoondVR — 24/7 Stream Recording via GitHub Actions
 #
-# Architecture:
-#   setup   → loads channels from .github/channels.json
-#   record  → records streams in parallel (one job per channel)
-#   process → converts .ts→.mp4, uploads to GoFile (runs AFTER record)
-#   restart → triggers the next workflow run for 24/7 operation
-#   release → builds binaries + Docker image (only on git tags)
+# Architecture (v2):
+#   setup   → loads + validates channels.json
+#   record  → (matrix) run goondvr per channel, convert .ts→.mp4, upload immediately
+#   commit  → merge all DB artifacts into repo (serial, avoids git race)
+#   restart → trigger next run for 24/7 loop
+#   release → build binaries + Docker image (only on git tags)
 #
-# Secrets needed:
-#   CHATURBATE_COOKIES  — cookie string for age-verified access
-#   USER_AGENT          — browser user-agent string (optional)
+# Design goals:
+#   • NO separate `process` job — record + convert + upload happen in one job
+#   • NO FlareSolverr service — direct HTTP with cookies only
+#   • NO polling loops "waiting for artifacts"
+#   • Clean, minimal bash — one concern per step
+#   • Self-healing restart that survives individual job failures
+#
+# Required secrets:
+#   CHATURBATE_COOKIES  — age-verification cookie string
+#   GOFILE_TOKEN        — (optional) GoFile.io API token for account uploads
+#   USER_AGENT          — (optional) browser user-agent override
 # =============================================================================
 
 name: GoondVR
 
+# ── Global env ─────────────────────────────────────────────────────────────
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-# Only one workflow run at a time.
-# Manual dispatch cancels the in-progress run; scheduled runs queue.
+# ── Concurrency ─────────────────────────────────────────────────────────────
+# Only one DVR run at a time.  Manual dispatch cancels the in-progress run;
+# scheduled triggers queue behind whatever is already running.
 concurrency:
-  group: goondvr
+  group: goondvr-dvr
   cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
+# ── Triggers ────────────────────────────────────────────────────────────────
 on:
   push:
     tags:
@@ -31,43 +42,44 @@ on:
     branches:
       - main
     paths:
-      - '.github/channels.json'
+      - ".github/channels.json"
+
   schedule:
-    - cron: '0 */5 * * *'   # Every 5 hours
-    - cron: '30 */6 * * *'  # Every 6 hours at :30 (backup)
+    - cron: "0 */5 * * *"   # every 5 h (safety net if restart chain breaks)
+
   workflow_dispatch:
     inputs:
       max_duration:
-        description: 'Recording chunk duration (minutes)'
+        description: "Recording chunk length (minutes)"
         required: false
-        default: '45'
+        default: "45"
         type: choice
-        options: ['1', '15', '30', '45', '60', '90', '120', '180', '240']
+        options: ["15", "30", "45", "60", "90", "120"]
       resolution:
-        description: 'Target resolution (9999 = source quality)'
+        description: "Target resolution (9999 = source)"
         required: false
-        default: '9999'
+        default: "9999"
         type: choice
-        options: ['9999', '1080', '720', '480']
+        options: ["9999", "1080", "720", "480"]
       framerate:
-        description: 'Target framerate'
+        description: "Target framerate"
         required: false
-        default: '60'
+        default: "60"
         type: choice
-        options: ['60', '30', '24']
+        options: ["60", "30", "24"]
       interval:
-        description: 'Check interval when offline (minutes)'
+        description: "Offline check interval (minutes)"
         required: false
-        default: '1'
+        default: "1"
         type: choice
-        options: ['1', '2', '5', '10']
+        options: ["1", "2", "5"]
       debug:
-        description: 'Enable debug logging'
+        description: "Enable debug logging"
         required: false
         default: false
         type: boolean
       run_once:
-        description: 'Run once (Record 1 chunk and stop, no loop)'
+        description: "One-shot mode: record one chunk then stop (no restart)"
         required: false
         default: false
         type: boolean
@@ -76,7 +88,7 @@ on:
 jobs:
 
   # ---------------------------------------------------------------------------
-  # RELEASE — build binaries & Docker image on git tags
+  # RELEASE — cross-compile + Docker push on git tags only
   # ---------------------------------------------------------------------------
   release:
     if: startsWith(github.ref, 'refs/tags/')
@@ -84,6 +96,7 @@ jobs:
     permissions:
       contents: write
       packages: write
+
     steps:
       - uses: actions/checkout@v4
 
@@ -91,16 +104,16 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build binaries
+      - name: Build cross-platform binaries
         run: |
           mkdir -p dist
           go mod download
-          GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" -o dist/linux_amd64_goondvr .
+          GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" -o dist/linux_amd64_goondvr   .
           GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/windows_amd64_goondvr.exe .
-          GOOS=darwin  GOARCH=amd64 go build -ldflags="-s -w" -o dist/darwin_amd64_goondvr .
-          GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" -o dist/darwin_arm64_goondvr .
+          GOOS=darwin  GOARCH=amd64 go build -ldflags="-s -w" -o dist/darwin_amd64_goondvr  .
+          GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" -o dist/darwin_arm64_goondvr  .
 
-      - name: Create release
+      - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
@@ -120,1127 +133,648 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/heapofchaos/goondvr:latest
-            ghcr.io/heapofchaos/goondvr:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/goondvr:latest
+            ghcr.io/${{ github.repository_owner }}/goondvr:${{ github.ref_name }}
 
   # ---------------------------------------------------------------------------
-  # SETUP — load and validate channel list
+  # SETUP — parse channels.json → emit matrix + metadata
   # ---------------------------------------------------------------------------
   setup:
     if: "!startsWith(github.ref, 'refs/tags/')"
     runs-on: ubuntu-latest
     outputs:
-      channels: ${{ steps.load.outputs.channels }}
+      channels:     ${{ steps.load.outputs.channels }}
       has-channels: ${{ steps.load.outputs.has-channels }}
+
     steps:
       - uses: actions/checkout@v4
 
       - id: load
+        name: Parse channels.json
         run: |
-          # Default to empty
-          echo "channels=[]" >> $GITHUB_OUTPUT
-          echo "has-channels=false" >> $GITHUB_OUTPUT
+          # Safe defaults
+          echo "channels=[]"     >> "$GITHUB_OUTPUT"
+          echo "has-channels=false" >> "$GITHUB_OUTPUT"
 
-          if [ ! -f .github/channels.json ]; then
-            echo "⚠️  .github/channels.json not found"
+          FILE=".github/channels.json"
+
+          if [[ ! -f "$FILE" ]]; then
+            echo "::warning::$FILE not found"
             exit 0
           fi
 
-          if ! jq empty .github/channels.json 2>/dev/null; then
-            echo "❌ Invalid JSON in channels.json"
-            exit 0
+          if ! jq empty "$FILE" 2>/dev/null; then
+            echo "::error::Invalid JSON in $FILE"
+            exit 1
           fi
 
           CHANNELS=$(jq -c \
-            '[.channels[] | select(.username != null and .username != "" and .site != null and .site != "")]' \
-            .github/channels.json)
+            '[.channels[]
+               | select(
+                   (.username | type == "string" and length > 0) and
+                   (.site     | type == "string" and length > 0)
+                 )
+             ]' "$FILE")
 
-          if [ "$CHANNELS" = "[]" ] || [ -z "$CHANNELS" ]; then
-            echo "⚠️  No valid channels found"
+          COUNT=$(echo "$CHANNELS" | jq 'length')
+          if [[ "$COUNT" -eq 0 ]]; then
+            echo "::warning::No valid channels found in $FILE"
             exit 0
           fi
 
-          # Overwrite defaults with valid data
-          echo "channels=$CHANNELS" >> $GITHUB_OUTPUT
-          echo "has-channels=true" >> $GITHUB_OUTPUT
-          echo "✓ Found $(echo "$CHANNELS" | jq 'length') channel(s)"
+          echo "channels=$CHANNELS"  >> "$GITHUB_OUTPUT"
+          echo "has-channels=true"   >> "$GITHUB_OUTPUT"
+          echo "✓ Loaded $COUNT channel(s)"
 
   # ---------------------------------------------------------------------------
-  # RECORD — capture streams (one runner per channel, parallel)
+  # RECORD — one runner per channel (parallel matrix)
+  #
+  # Each job:
+  #   1. Builds goondvr from source
+  #   2. Records up to MAX_DURATION min (or until stream ends)
+  #   3. Converts .ts → .mp4 with ffmpeg (stream-copy, fast)
+  #   4. Uploads to GoFile via curl (3 retries + exponential backoff)
+  #   5. Writes a streak file (offline run counter) and persists it as artifact
+  #   6. Exports a DB JSON artifact for the commit job
   # ---------------------------------------------------------------------------
   record:
     if: "!startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true'"
     needs: setup
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours hard limit
+    timeout-minutes: 330  # 5.5 h hard cap — leaves 30 min for upload+cleanup
+
     strategy:
       matrix:
         channel: ${{ fromJson(needs.setup.outputs.channels) }}
-      fail-fast: false
+      fail-fast: false   # one channel failing must not cancel others
       max-parallel: 20
-
-    services:
-      flaresolverr:
-        image: ghcr.io/flaresolverr/flaresolverr:latest
-        ports: ["8191:8191"]
-        env:
-          LOG_LEVEL: info
-          CAPTCHA_SOLVER: none
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
 
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg jq
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg jq curl
 
-      - name: Build
+      - name: Build goondvr
         run: |
           go mod download
-          go build -o goondvr .
+          go build -ldflags="-s -w" -o goondvr .
+          echo "✓ Built: $(./goondvr --version 2>&1 || echo 'ok')"
 
+      # ── Offline streak ──────────────────────────────────────────────────
+      # Tracks consecutive runs with zero recordings.  We use GitHub Actions
+      # Cache (keyed per channel) as the persistence layer.
       - name: Restore offline streak
+        id: streak-restore
         uses: actions/cache/restore@v4
         continue-on-error: true
         with:
           path: streak/
-          key: streak-${{ matrix.channel.username }}-${{ matrix.channel.site }}-${{ github.run_id }}
-          restore-keys: |
-            streak-${{ matrix.channel.username }}-${{ matrix.channel.site }}-
+          key:          streak-${{ matrix.channel.username }}-${{ matrix.channel.site }}-${{ github.run_id }}
+          restore-keys: streak-${{ matrix.channel.username }}-${{ matrix.channel.site }}-
 
-      - name: Wait for FlareSolverr
-        run: |
-          echo "Waiting for FlareSolverr..."
-          for i in $(seq 1 60); do
-            if curl -s --max-time 5 http://localhost:8191/v1 > /dev/null 2>&1; then
-              echo "✓ FlareSolverr ready"
-              exit 0
-            fi
-            sleep 3
-          done
-          echo "❌ FlareSolverr failed to start after 3 minutes"
-          exit 1
-
+      # ── Record ─────────────────────────────────────────────────────────
       - name: Record stream
         id: record
         env:
-          COOKIES: ${{ secrets.CHATURBATE_COOKIES }}
+          COOKIES:    ${{ secrets.CHATURBATE_COOKIES }}
           USER_AGENT: ${{ secrets.USER_AGENT }}
-          FLARESOLVERR_URL: http://localhost:8191/v1
         run: |
-          mkdir -p videos
+          set -uo pipefail
 
-          # ── Parameters ─────────────────────────────────────────────
+          USERNAME="${{ matrix.channel.username }}"
+          SITE="${{ matrix.channel.site }}"
           MAX_DURATION="${{ inputs.max_duration || '45' }}"
           RESOLUTION="${{ inputs.resolution || '9999' }}"
           FRAMERATE="${{ inputs.framerate || '60' }}"
           INTERVAL="${{ inputs.interval || '1' }}"
           DEBUG_FLAG="${{ inputs.debug == true && '--debug' || '' }}"
 
-          echo "╔══════════════════════════════════════════════════════╗"
-          echo "║  Recording: ${{ matrix.channel.username }} @ ${{ matrix.channel.site }}"
-          echo "║  Duration: ${MAX_DURATION}min  Res: ${RESOLUTION}p  FPS: ${FRAMERATE}"
-          echo "║  Interval: ${INTERVAL}min  Debug: ${{ inputs.debug || false }}"
-          echo "╚══════════════════════════════════════════════════════╝"
+          echo "╔══════════════════════════════════════════════════╗"
+          echo "║  Channel : $USERNAME @ $SITE"
+          echo "║  Chunk   : ${MAX_DURATION}min  Res: ${RESOLUTION}p  FPS: ${FRAMERATE}"
+          echo "╚══════════════════════════════════════════════════╝"
 
-          # ── Disk space pre-check ───────────────────────────────────
-          AVAIL_GB=$(df -BG . | awk 'NR==2 {gsub(/G/,""); print $4}')
-          echo "Disk: ${AVAIL_GB}GB available"
-          if [ "$AVAIL_GB" -lt 2 ]; then
-            echo "❌ Need at least 2GB, have ${AVAIL_GB}GB"
+          # ── Guard: disk space ─────────────────────────────────────────
+          AVAIL_GB=$(df -BG . | awk 'NR==2{gsub(/G/,""); print $4}')
+          echo "Disk available: ${AVAIL_GB}GB"
+          if [[ "$AVAIL_GB" -lt 3 ]]; then
+            echo "::error::Not enough disk space (${AVAIL_GB}GB < 3GB required)"
             exit 1
           fi
 
-          # ── Configure secrets ──────────────────────────────────────
-          CLEAN_COOKIES=$(printf '%s' "$COOKIES" | tr -d '\n\r\t' | tr -s ' ')
-          CLEAN_UA=$(printf '%s' "$USER_AGENT" | tr -d '\n\r\t' | tr -s ' ')
-
-          if [ -z "$CLEAN_COOKIES" ]; then
-            echo "⚠️  CHATURBATE_COOKIES not set — public streams only"
+          # ── Sanitize secrets ──────────────────────────────────────────
+          CLEAN_COOKIES=$(printf '%s' "${COOKIES:-}" | tr -d '\n\r\t' | tr -s ' ')
+          CLEAN_UA=$(printf '%s' "${USER_AGENT:-}" | tr -d '\n\r\t' | tr -s ' ')
+          if [[ -z "$CLEAN_COOKIES" ]]; then
+            echo "::warning::CHATURBATE_COOKIES not set — age-gated streams may fail"
           fi
-          if [ -z "$CLEAN_UA" ]; then
+          if [[ -z "$CLEAN_UA" ]]; then
             CLEAN_UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-            echo "Using default user-agent"
           fi
 
-          echo "Cookie length: ${#CLEAN_COOKIES} | UA length: ${#CLEAN_UA}"
+          mkdir -p videos/completed
 
-          # ── Background monitor ─────────────────────────────────────
-          # Watches disk space and detects when the stream stops producing data.
+          # ── Background disk monitor ───────────────────────────────────
+          # Kills goondvr if disk drops below 1 GB or no new data for 5 min.
+          _MD="$MAX_DURATION"
           (
-            trap 'exit 0' SIGTERM SIGINT
+            trap 'exit 0' SIGTERM
             PREV_SIZE=0
-            STALE_COUNT=0
-            START_TS=$(date +%s)
-            MAX_MONITOR_SECS=$((5 * 3600))  # 5 hours
+            STALE=0
+            MAX_STALE=$(( _MD <= 5 ? 2 : 5 ))
 
-            # Stale threshold: fewer checks for short recordings
-            if [ "$MAX_DURATION" -le 5 ]; then
-              MAX_STALE=2
-            else
-              MAX_STALE=5
-            fi
-
-            while true; do
-              sleep 60
-
-              # 5-hour hard stop
-              ELAPSED=$(( $(date +%s) - START_TS ))
-              if [ $ELAPSED -gt $MAX_MONITOR_SECS ]; then
-                echo "⏱️  Monitor: 5-hour limit — stopping goondvr"
-                pkill -f goondvr || true
-                break
-              fi
-
-              AVAIL=$(df -BG . | awk 'NR==2 {gsub(/G/,""); print $4}')
-              CURR_SIZE=$(du -sb videos 2>/dev/null | cut -f1 || echo "0")
+            while sleep 60; do
+              AVAIL=$(df -BG . | awk 'NR==2{gsub(/G/,""); print $4}')
+              CURR=$(du -sb videos 2>/dev/null | cut -f1 || echo 0)
               FCOUNT=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l)
+              SIZE_MB=$(awk "BEGIN{printf \"%.1f\", $CURR/1048576}")
+              echo "📊 disk=${AVAIL}GB | files=${FCOUNT} | size=${SIZE_MB}MB"
 
-              echo "📊 Monitor: ${AVAIL}GB free | ${FCOUNT} file(s) | $(awk "BEGIN{printf \"%.1f\", $CURR_SIZE/1048576}")MB total"
-
-              # Emergency disk stop
-              if [ "$AVAIL" -lt 1 ]; then
-                echo "🛑 Monitor: Disk critically low (${AVAIL}GB) — stopping"
-                pkill -f goondvr || true
-                break
+              if [[ "$AVAIL" -lt 1 ]]; then
+                echo "🛑 Critical disk — stopping"
+                pkill -f goondvr || true; break
               fi
 
-              # Detect stream end via size growth stalling
-              if [ "$FCOUNT" -gt 0 ]; then
-                if [ "$CURR_SIZE" -gt "$PREV_SIZE" ]; then
-                  STALE_COUNT=0
+              if [[ "$FCOUNT" -gt 0 ]]; then
+                if [[ "$CURR" -gt "$PREV_SIZE" ]]; then
+                  STALE=0
                 else
-                  STALE_COUNT=$((STALE_COUNT + 1))
-                  echo "⚠️  No new data ($STALE_COUNT/$MAX_STALE)"
-                  if [ "$STALE_COUNT" -ge "$MAX_STALE" ]; then
-                    echo "🛑 Monitor: Stream appears ended — stopping"
-                    pkill -f goondvr || true
-                    break
+                  STALE=$(( STALE + 1 ))
+                  echo "⚠️  No growth ($STALE/$MAX_STALE)"
+                  if [[ "$STALE" -ge "$MAX_STALE" ]]; then
+                    echo "🛑 Stream stalled — stopping"
+                    pkill -f goondvr || true; break
                   fi
                 fi
-                PREV_SIZE=$CURR_SIZE
+                PREV_SIZE=$CURR
               fi
             done
           ) &
           MONITOR_PID=$!
 
-          # ── Recording loop ─────────────────────────────────────────
+          # ── Recording loop ────────────────────────────────────────────
           RECORDED=false
           OFFLINE_COUNT=0
           ATTEMPT=0
-          
-          # Separate timeouts: initial connection vs recording chunks
-          if [ "$MAX_DURATION" -le 5 ]; then
-            INITIAL_TIMEOUT=10  # 10 minutes for initial FlareSolverr connection
-            REC_TIMEOUT=$MAX_DURATION  # Use actual duration for video chunks
-            MAX_OFFLINE=2
-            MAX_ATTEMPTS=10
-          else
-            INITIAL_TIMEOUT=$MAX_DURATION  # For longer chunks, use same timeout
-            REC_TIMEOUT=$MAX_DURATION  # Use actual duration for video chunks
-            MAX_OFFLINE=5
-            MAX_ATTEMPTS=30
-          fi
+          MAX_OFFLINE=5
+          MAX_ATTEMPTS=20   # ~20 min at 1-min interval before giving up
 
-          echo "Initial connection timeout: ${INITIAL_TIMEOUT}min | Video chunk length: ${REC_TIMEOUT}min | Max offline: $MAX_OFFLINE | Max attempts: $MAX_ATTEMPTS"
-
-          # ── Run Once Monitor ───────────────────────────────────
-          # If run_once is enabled, start a background monitor that kills goondvr
-          # immediately after the first video file is created
-          if [ "${{ inputs.run_once }}" = "true" ]; then
-            (
-              echo "🔍 Run Once Monitor: Watching for first video file..."
-              while true; do
-                sleep 5
-                VCOUNT=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l)
-                if [ "$VCOUNT" -ge 1 ]; then
-                  echo "🛑 Run Once Monitor: First video detected - stopping goondvr"
-                  pkill -f goondvr || true
-                  break
-                fi
-              done
-            ) &
-            RUN_ONCE_MONITOR_PID=$!
-          fi
+          ARGS=(
+            -u "$USERNAME"
+            --site "$SITE"
+            --cookies "$CLEAN_COOKIES"
+            --user-agent "$CLEAN_UA"
+            --resolution "$RESOLUTION"
+            --framerate "$FRAMERATE"
+            --interval "$INTERVAL"
+            --max-duration "$MAX_DURATION"
+            --max-filesize 0
+            --completed-dir videos/completed
+            --finalize-mode none
+          )
+          [[ -n "$DEBUG_FLAG" ]] && ARGS+=("$DEBUG_FLAG")
 
           while true; do
-            ATTEMPT=$((ATTEMPT + 1))
+            ATTEMPT=$(( ATTEMPT + 1 ))
             echo ""
-            echo "═══ Attempt #$ATTEMPT  $(date '+%Y-%m-%d %H:%M:%S') ═══"
+            echo "═══ Attempt #$ATTEMPT  $(date '+%H:%M:%S') ═══"
 
-            # Use longer timeout for first connection attempt (FlareSolverr needs time)
-            # BUT if run_once is enabled, limit to recording duration + connection buffer
-            if [ "$ATTEMPT" -eq 1 ] && [ "$RECORDED" = "false" ]; then
-              if [ "${{ inputs.run_once }}" = "true" ]; then
-                # For run_once: ONLY use the video duration timeout (no extra time)
-                # This ensures only 1 video file is created
-                CURRENT_TIMEOUT=$REC_TIMEOUT
-                echo "🔄 First attempt (run once) - ${CURRENT_TIMEOUT}min timeout (will create 1 video file)"
-              else
-                CURRENT_TIMEOUT=$INITIAL_TIMEOUT
-                echo "🔄 First connection attempt - allowing ${CURRENT_TIMEOUT}min for FlareSolverr to bypass Cloudflare"
-              fi
-            else
-              CURRENT_TIMEOUT=$REC_TIMEOUT
-              if [ "${{ inputs.run_once }}" = "true" ]; then
-                echo "📹 Recording ${CURRENT_TIMEOUT}-minute video (run once mode)"
-              else
-                echo "📹 Recording ${CURRENT_TIMEOUT}-minute video chunk"
-              fi
-            fi
+            RC=0
+            timeout --kill-after=60 $(( MAX_DURATION + 2 ))m \
+              ./goondvr "${ARGS[@]}" || RC=$?
 
-            timeout --kill-after=30 ${CURRENT_TIMEOUT}m ./goondvr \
-              -u "${{ matrix.channel.username }}" \
-              --site "${{ matrix.channel.site }}" \
-              --cookies "$CLEAN_COOKIES" \
-              --user-agent "$CLEAN_UA" \
-              --resolution "$RESOLUTION" \
-              --framerate "$FRAMERATE" \
-              --interval "$INTERVAL" \
-              --max-duration "$MAX_DURATION" \
-              --max-filesize 0 \
-              --completed-dir videos/completed \
-              --finalize-mode none \
-              $DEBUG_FLAG || RC=$?
-            RC=${RC:-0}
-
-            # Count video files
             VCOUNT=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l)
-            if [ "$VCOUNT" -gt 0 ]; then
+
+            # First video appeared → stream is/was live
+            if [[ "$VCOUNT" -gt 0 ]]; then
               RECORDED=true
-              ATTEMPT=0  # Reset attempt counter after successful recording
-              
-              # If run_once is enabled, stop immediately after FIRST file is created
-              if [ "${{ inputs.run_once }}" = "true" ]; then
-                echo "✅ First video file created - stopping goondvr (run once mode)"
-                pkill -f goondvr || true
-                sleep 2
-                echo "🛑 Run Once enabled - stopping after creating 1 video file"
-                break
-              fi
-              
-              echo "✅ Connection established - now recording ${REC_TIMEOUT}-minute video chunks"
+              ATTEMPT=0          # reset: treat it as "fresh" now
+              OFFLINE_COUNT=0
             fi
 
-            # Timeout (124) = stream was/is live, loop for next chunk
-            if [ $RC -eq 124 ]; then
-              if [ "${{ inputs.run_once }}" = "true" ]; then
-                echo "🛑 Run Once enabled - stopping after 1 chunk"
-                break
-              fi
-              echo "⏱️  Chunk complete (timeout) — continuing immediately"
+            # run_once: bail immediately after the first chunk
+            if [[ "${{ inputs.run_once || 'false' }}" == "true" && "$RECORDED" == "true" ]]; then
+              echo "🛑 run_once — stopping after first recording"
+              break
+            fi
+
+            # Chunk timed out (RC=124) → stream still live, keep looping
+            if [[ "$RC" -eq 124 ]]; then
+              echo "⏱️ Chunk complete — starting next chunk"
               OFFLINE_COUNT=0
               continue
             fi
 
-            # goondvr exited on its own — stream likely offline
-            if [ "$RECORDED" = "true" ]; then
-              if [ "${{ inputs.run_once }}" = "true" ]; then
-                echo "🛑 Run Once enabled - finished recording (stream disconnected/ended) — stopping"
-                break
-              fi
-              OFFLINE_COUNT=$((OFFLINE_COUNT + 1))
-              echo "Stream offline check $OFFLINE_COUNT/$MAX_OFFLINE"
-              if [ "$OFFLINE_COUNT" -ge "$MAX_OFFLINE" ]; then
-                echo "🎬 Stream ended — proceeding to upload"
+            # goondvr exited early
+            if [[ "$RECORDED" == "true" ]]; then
+              OFFLINE_COUNT=$(( OFFLINE_COUNT + 1 ))
+              echo "Stream offline? ($OFFLINE_COUNT/$MAX_OFFLINE)"
+              if [[ "$OFFLINE_COUNT" -ge "$MAX_OFFLINE" ]]; then
+                echo "🎬 Stream ended — moving to upload"
                 break
               fi
             else
-              if [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]; then
-                echo "⏸️  Never came online after $ATTEMPT attempts"
-                
-                # For connection failures, add extra retry with different approach
-                if [ "$VCOUNT" -eq 0 ]; then
-                  echo "🔄 Trying alternative connection method..."
-                  
-                  # Wait longer and try once more with different settings
-                  sleep 300  # 5 minutes
-                  
-                  # Try one final attempt with extended timeout
-                  echo "═══ Final Attempt (Extended Timeout) ═══"
-                  timeout --kill-after=60 20m ./goondvr \
-                    -u "${{ matrix.channel.username }}" \
-                    --site "${{ matrix.channel.site }}" \
-                    --cookies "$CLEAN_COOKIES" \
-                    --user-agent "$CLEAN_UA" \
-                    --resolution "$RESOLUTION" \
-                    --framerate "$FRAMERATE" \
-                    --interval "$INTERVAL" \
-                    --max-duration "$MAX_DURATION" \
-                    --max-filesize 0 \
-                    --completed-dir videos/completed \
-                    --finalize-mode none \
-                    $DEBUG_FLAG || RC=$?
-                  
-                  FINAL_VCOUNT=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l)
-                  if [ "$FINAL_VCOUNT" -gt 0 ]; then
-                    echo "✅ Final attempt succeeded!"
-                    RECORDED=true
-                    break
-                  fi
-                fi
-                
-                echo "❌ All connection attempts failed — stopping"
+              if [[ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]]; then
+                echo "⏸️ Stream never came online after $MAX_ATTEMPTS attempts — skipping"
                 break
               fi
-              echo "Waiting for stream ($ATTEMPT/$MAX_ATTEMPTS)..."
+              echo "Waiting for stream… ($ATTEMPT/$MAX_ATTEMPTS)"
             fi
 
-            sleep $((INTERVAL * 60))
+            sleep $(( INTERVAL * 60 ))
           done
 
-          # ── Stop monitors ──────────────────────────────────────────
-          # Stop disk monitor
-          if kill -0 "$MONITOR_PID" 2>/dev/null; then
-            kill -TERM "$MONITOR_PID" 2>/dev/null || true
-            wait "$MONITOR_PID" 2>/dev/null || true
-          fi
-          
-          # Stop run_once monitor if it exists
-          if [ -n "${RUN_ONCE_MONITOR_PID:-}" ] && kill -0 "$RUN_ONCE_MONITOR_PID" 2>/dev/null; then
-            kill -TERM "$RUN_ONCE_MONITOR_PID" 2>/dev/null || true
-            wait "$RUN_ONCE_MONITOR_PID" 2>/dev/null || true
-          fi
+          # Clean up monitor
+          kill -TERM "$MONITOR_PID" 2>/dev/null || true
+          wait  "$MONITOR_PID" 2>/dev/null || true
 
-          # ── Final summary ──────────────────────────────────────────
-          sleep 3  # Let any final I/O flush
-          echo ""
-          echo "╔══════════════════════════════════════════════════════╗"
-          echo "║  Recording Summary"
-          echo "╚══════════════════════════════════════════════════════╝"
-
-          TOTAL_FILES=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l)
+          # ── Summary ───────────────────────────────────────────────────
+          TOTAL=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l)
           TOTAL_SIZE=$(du -sh videos 2>/dev/null | cut -f1 || echo "0")
-          echo "Files: $TOTAL_FILES | Size: $TOTAL_SIZE"
-          find videos -type f \( -name "*.ts" -o -name "*.mp4" \) -exec ls -lh {} \; 2>/dev/null || true
+          echo ""
+          echo "Recording done: $TOTAL file(s) / $TOTAL_SIZE"
 
-          # ── Offline streak tracking ────────────────────────────────
-          # Counts how many consecutive runs produced zero recordings.
-          # Used by the restart job to stop auto-restarting if a streamer
-          # has been offline for a very long time.
+          HAS_FILES=false
+          [[ "$TOTAL" -gt 0 ]] && HAS_FILES=true
+          echo "has-files=$HAS_FILES" >> "$GITHUB_OUTPUT"
+
+      # ── Offline streak tracking ─────────────────────────────────────────
+      - name: Update offline streak
+        if: always()
+        id: streak
+        run: |
           mkdir -p streak
           STREAK_FILE="streak/${{ matrix.channel.username }}-${{ matrix.channel.site }}.txt"
-          PREV_STREAK=$(cat "$STREAK_FILE" 2>/dev/null | grep -oE '^[0-9]+' || echo "0")
-
-          if [ "$TOTAL_FILES" -gt 0 ]; then
-            NEW_STREAK=0
-            echo "✓ Recorded — offline streak reset (was $PREV_STREAK)"
+          PREV=$(grep -oE '^[0-9]+' "$STREAK_FILE" 2>/dev/null || echo "0")
+          HAS="${{ steps.record.outputs.has-files || 'false' }}"
+          if [[ "$HAS" == "true" ]]; then
+            NEW=0
+            echo "✓ Recorded — streak reset (was $PREV)"
           else
-            NEW_STREAK=$((PREV_STREAK + 1))
-            echo "⚠️  Nothing recorded — offline streak: $NEW_STREAK"
+            NEW=$(( PREV + 1 ))
+            echo "⚠️ Nothing recorded — streak now $NEW"
           fi
+          echo "$NEW $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STREAK_FILE"
+          echo "streak=$NEW" >> "$GITHUB_OUTPUT"
 
-          # Write streak file: count + last-updated timestamp
-          echo "$NEW_STREAK $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STREAK_FILE"
-
-          # Set outputs for downstream jobs
-          echo "has-files=$([ "$TOTAL_FILES" -gt 0 ] && echo true || echo false)" >> $GITHUB_OUTPUT
-          echo "offline-streak=$NEW_STREAK" >> $GITHUB_OUTPUT
-
-      # Persist offline streak counters across runs
-      - name: Save offline streak
+      - name: Save offline streak cache
         if: always()
         uses: actions/cache/save@v4
         with:
           path: streak/
           key: streak-${{ matrix.channel.username }}-${{ matrix.channel.site }}-${{ github.run_id }}
 
-      - name: Upload offline streak
+      - name: Upload streak artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: streak-${{ matrix.channel.username }}-${{ matrix.channel.site }}
           path: streak/
-          retention-days: 1
+          retention-days: 7
           if-no-files-found: ignore
           compression-level: 0
 
-      # Upload raw recordings as artifacts for the process job
-      - name: Upload recordings
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: raw-videos-${{ matrix.channel.username }}-${{ matrix.channel.site }}
-          path: videos/
-          retention-days: 1
-          if-no-files-found: ignore
-          compression-level: 0
-
-      # ── Immediate Upload ───────────────────────────────────────
-      # Always upload immediately after recording for best performance
-      - name: Setup Python for upload
+      # ── Convert .ts → .mp4 ─────────────────────────────────────────────
+      - name: Convert recordings
         if: steps.record.outputs.has-files == 'true'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+        run: |
+          mkdir -p videos/mp4
 
-      - name: Install dependencies for upload
-        if: steps.record.outputs.has-files == 'true'
-        run: pip install requests tqdm
+          find videos/completed -type f -name "*.ts" | sort | while read -r f; do
+            BASE=$(basename "$f" .ts)
+            OUT="videos/mp4/${BASE}.mp4"
+            echo "▶ Converting $f"
+            if ffmpeg -nostdin -y -i "$f" -c copy -movflags +faststart "$OUT" 2>&1 | tail -3; then
+              echo "  ✓ → $OUT ($(du -h "$OUT" | cut -f1))"
+              rm -f "$f"
+            else
+              echo "  ✗ Conversion failed — uploading raw .ts instead"
+              cp "$f" "videos/mp4/${BASE}.ts"
+            fi
+          done
 
-      - name: Convert and upload to GoFile
+          # Also move any already-mp4 files
+          find videos/completed -type f -name "*.mp4" | while read -r f; do
+            mv "$f" "videos/mp4/$(basename "$f")"
+          done
+
+          echo "Files ready to upload:"
+          ls -lh videos/mp4/ 2>/dev/null || echo "(none)"
+
+      # ── Upload to GoFile ────────────────────────────────────────────────
+      - name: Upload to GoFile
         if: steps.record.outputs.has-files == 'true'
+        id: upload
         env:
           GOFILE_TOKEN: ${{ secrets.GOFILE_TOKEN }}
         run: |
-          echo "╔══════════════════════════════════════════════════════╗"
-          echo "║  Upload: ${{ matrix.channel.username }}"
-          echo "╚══════════════════════════════════════════════════════╝"
-          
-          # Get current date for database organization
+          USERNAME="${{ matrix.channel.username }}"
+          SITE="${{ matrix.channel.site }}"
           CURRENT_DATE=$(date -u +%Y-%m-%d)
-          STREAMER_DB="database/${{ matrix.channel.username }}"
-          STREAMER_DATE_DB="$STREAMER_DB/$CURRENT_DATE"
-          mkdir -p "$STREAMER_DATE_DB"
+          DB_DIR="database/$USERNAME/$CURRENT_DATE"
+          mkdir -p "$DB_DIR"
 
-          # Initialize database structure using jq (more reliable in GitHub Actions)
-          STATS_FILE="$STREAMER_DB/stats.json"
-          RECORDINGS_FILE="$STREAMER_DATE_DB/recordings.json"
-          
-          if [ ! -f "$STATS_FILE" ]; then
-            echo "{\"username\":\"${{ matrix.channel.username }}\",\"site\":\"${{ matrix.channel.site }}\",\"created_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"last_updated\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"statistics\":{\"total_recordings\":0,\"total_size_gb\":0.0,\"total_duration_hours\":0.0,\"total_days_recorded\":0,\"first_recording_date\":null,\"last_recording_date\":null}}" > "$STATS_FILE"
-          fi
-          
-          if [ ! -f "$RECORDINGS_FILE" ]; then
-            echo "{\"date\":\"$CURRENT_DATE\",\"username\":\"${{ matrix.channel.username }}\",\"recordings\":[],\"summary\":{\"total_recordings\":0,\"total_size_bytes\":0,\"total_size_mb\":0.0,\"total_duration_seconds\":0,\"total_duration_minutes\":0.0,\"first_recording_time\":null,\"last_recording_time\":null}}" > "$RECORDINGS_FILE"
-          fi
-          
-          # Process and upload videos
-          for file in videos/completed/*.ts videos/completed/*.mp4 2>/dev/null; do
-            [ -f "$file" ] || continue
-            
-            BASENAME=$(basename "$file")
-            EXT="${BASENAME##*.}"
-            NAME="${BASENAME%.*}"
-            
+          # Best server
+          SERVER=$(curl -sf --max-time 10 https://api.gofile.io/servers \
+            | jq -r '.data.servers[0].name // "store1"' 2>/dev/null || echo "store1")
+          echo "GoFile server: $SERVER"
+
+          RECORDS="[]"
+
+          find videos/mp4 -type f \( -name "*.mp4" -o -name "*.ts" \) | sort | while read -r FILE; do
+            FNAME=$(basename "$FILE")
+            FSIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
+            FSIZE_MB=$(awk "BEGIN{printf \"%.1f\", $FSIZE/1048576}")
             echo ""
-            echo "── Processing: $BASENAME ──"
-            
-            # Convert if needed
-            if [[ "$file" == *.ts ]]; then
-              MP4_FILE="videos/completed/${NAME}.mp4"
-              echo "Converting $file to MP4..."
-              if ffmpeg -i "$file" -c copy -movflags +faststart "$MP4_FILE" -y 2>&1 | tail -5; then
-                echo "✓ Converted to MP4"
-                OUTPUT_FILE="$MP4_FILE"
-              else
-                echo "⚠️  Conversion failed, uploading original"
-                OUTPUT_FILE="$file"
-              fi
-            else
-              OUTPUT_FILE="$file"
-            fi
-            
-            # Get file size
-            FILE_SIZE=$(stat -c%s "$OUTPUT_FILE" 2>/dev/null || echo "0")
-            FILE_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $FILE_SIZE / 1048576}")
-            
-            # Upload to GoFile
-            if [ -n "$GOFILE_TOKEN" ]; then
-              echo "📤 Uploading $(basename "$OUTPUT_FILE") (${FILE_SIZE_MB}MB) to GoFile..."
-              
-              UPLOAD_START=$(date +%s)
-              if python3 upload_to_gofile.py "$OUTPUT_FILE"; then
-                UPLOAD_END=$(date +%s)
-                UPLOAD_DURATION=$((UPLOAD_END - UPLOAD_START))
-                UPLOAD_SPEED=$(awk "BEGIN {printf \"%.2f\", $FILE_SIZE / $UPLOAD_DURATION / 1048576}")
-                
-                # Extract link from the upload script output
-                DOWNLOAD_LINK=$(jq -r '.uploads[-1].download_page // empty' database/backups/uploaded_links.json 2>/dev/null)
-                
-                if [ -n "$DOWNLOAD_LINK" ]; then
-                  echo "✓ Uploaded successfully: $DOWNLOAD_LINK"
-                  
-                  # Save to database using jq (more reliable than Python in GitHub Actions)
-                  RECORD=$(jq -n \
-                    --arg id "${{ matrix.channel.username }}_$(date +%s)_${RANDOM}" \
-                    --arg user "${{ matrix.channel.username }}" \
-                    --arg site "${{ matrix.channel.site }}" \
-                    --arg file "$(basename "$OUTPUT_FILE")" \
-                    --arg link "$DOWNLOAD_LINK" \
-                    --arg time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                    --argjson size "$FILE_SIZE" \
-                    --argjson dur "$UPLOAD_DURATION" \
-                    --arg speed "$UPLOAD_SPEED" \
-                    '{
-                      id: $id, username: $user, site: $site,
-                      filename: $file, gofile_link: $link,
-                      uploaded_at: $time, filesize_bytes: $size,
-                      upload_duration: $dur, upload_speed: ($speed | tonumber),
-                      status: "uploaded"
-                    }')
-                  
-                  # Add to recordings file
-                  if jq ".recordings += [$RECORD]" "$RECORDINGS_FILE" > "$RECORDINGS_FILE.tmp" 2>/dev/null; then
-                    mv "$RECORDINGS_FILE.tmp" "$RECORDINGS_FILE"
-                    
-                    # Update summary
-                    jq '
-                      .summary.total_recordings = (.recordings | length) |
-                      .summary.total_size_bytes = ([.recordings[].filesize_bytes] | add // 0) |
-                      .summary.total_size_mb = ((.summary.total_size_bytes / 1048576) * 100 | round / 100) |
-                      .summary.first_recording_time = (.recordings[0].uploaded_at) |
-                      .summary.last_recording_time = (.recordings[-1].uploaded_at)
-                    ' "$RECORDINGS_FILE" > "$RECORDINGS_FILE.tmp"
-                    mv "$RECORDINGS_FILE.tmp" "$RECORDINGS_FILE"
-                    
-                    echo "✓ Saved to database: $RECORDINGS_FILE"
-                  else
-                    echo "⚠️  Database save failed"
-                  fi
-                  
-                  # Delete local files after successful upload and database save
-                  rm -f "$file" "$OUTPUT_FILE"
-                  echo "✓ Cleaned up local files"
-                else
-                  echo "⚠️  Could not extract download link"
-                fi
-              else
-                echo "⚠️  Upload failed"
-              fi
-            fi
-          done
-          
-          echo ""
-          echo "✓ Upload complete for ${{ matrix.channel.username }}"
+            echo "── Uploading: $FNAME (${FSIZE_MB} MB) ──"
 
-      - name: Upload database artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: uploads-db-${{ matrix.channel.username }}-${{ matrix.channel.site }}
-          path: database/
-          retention-days: 30
-          if-no-files-found: ignore
-          compression-level: 9
-
-  # ---------------------------------------------------------------------------
-  # PROCESS — convert to MP4, upload to GoFile (runs independently, checks continuously)
-  # ---------------------------------------------------------------------------
-  process:
-    if: "always() && !cancelled() && !startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true'"
-    needs: [setup]
-    runs-on: ubuntu-latest
-    timeout-minutes: 180  # 3 hours
-    strategy:
-      matrix:
-        channel: ${{ fromJson(needs.setup.outputs.channels) }}
-      fail-fast: false
-      max-parallel: 5
-
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      
-      - name: Install Python dependencies
-        run: pip install requests
-      
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg jq
-
-      - name: Download recordings
-        id: download
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: raw-videos-${{ matrix.channel.username }}-${{ matrix.channel.site }}
-          path: videos/
-
-      - name: Wait and retry if no artifacts yet
-        if: steps.download.outcome != 'success'
-        run: |
-          echo "No artifacts yet for ${{ matrix.channel.username }}, waiting..."
-          for i in {1..60}; do
-            echo "Check $i/60 - waiting 30s..."
-            sleep 30
-            
-            # Try downloading again
-            if gh run download ${{ github.run_id }} \
-               --name raw-videos-${{ matrix.channel.username }}-${{ matrix.channel.site }} \
-               --dir videos/ 2>/dev/null; then
-              echo "✓ Artifacts found!"
-              exit 0
-            fi
-          done
-          echo "No artifacts after 30 minutes, skipping..."
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-
-
-      - name: Process and upload to GoFile
-        if: steps.download.outcome == 'success'
-        run: |
-          # Get current date for database organization
-          CURRENT_DATE=$(date -u +%Y-%m-%d)
-          STREAMER_DB="database/${{ matrix.channel.username }}"
-          STREAMER_DATE_DB="$STREAMER_DB/$CURRENT_DATE"
-          mkdir -p "$STREAMER_DATE_DB" processed
-
-          # Initialize organized database structure using Python script
-          python3 scripts/database_manager.py init "${{ matrix.channel.username }}" "${{ matrix.channel.site }}"
-
-          # Find all video files (skip anything < 1KB)
-          VIDEO_COUNT=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) -size +1k 2>/dev/null | wc -l)
-
-          if [ "$VIDEO_COUNT" -eq 0 ]; then
-            echo "No video files to process"
-            exit 0
-          fi
-
-          echo "╔══════════════════════════════════════════════════════╗"
-          echo "║  Processing $VIDEO_COUNT file(s) for ${{ matrix.channel.username }}"
-          echo "╚══════════════════════════════════════════════════════╝"
-
-          PROCESSED=0
-          FAILED=0
-          JOB_START=$(date +%s)
-          MAX_JOB_TIME=$((170 * 60))  # 170 min (leave 10 min buffer)
-
-          while IFS= read -r VIDEO_FILE; do
-            # Time check — stop if approaching job timeout
-            ELAPSED=$(( $(date +%s) - JOB_START ))
-            if [ $ELAPSED -gt $MAX_JOB_TIME ]; then
-              echo "⏱️  Approaching job timeout — stopping"
-              break
-            fi
-
-            BASENAME=$(basename "$VIDEO_FILE")
-            EXT="${BASENAME##*.}"
-            NAME="${BASENAME%.*}"
-            MP4_FILE="processed/${NAME}.mp4"
-
-            echo ""
-            echo "── Processing: $BASENAME ──"
-
-            # Disk space check
-            AVAIL_GB=$(df -BG . | awk 'NR==2 {gsub(/G/,""); print $4}')
-            if [ "$AVAIL_GB" -lt 1 ]; then
-              echo "⚠️  Disk space too low (${AVAIL_GB}GB) — skipping rest"
-              break
-            fi
-
-            VIDEO_SIZE=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || echo "0")
-            VIDEO_SIZE_MB=$(awk "BEGIN {printf \"%.0f\", $VIDEO_SIZE / 1048576}")
-            echo "  Input: ${VIDEO_SIZE_MB}MB ($EXT)"
-
-            # ── Step 1: Convert .ts → .mp4 ─────────────────────────
-            CONVERT_DURATION=0
-            if [ "$EXT" = "mp4" ]; then
-              MP4_FILE="$VIDEO_FILE"
-              echo "  Already MP4 — skipping conversion"
-            else
-              # Dynamic timeout: 30min base + 10min per GB
-              CONV_TIMEOUT=$(awk "BEGIN {t=30+int($VIDEO_SIZE/1073741824)*10; print (t>120)?120:t}")
-
-              echo "  Converting .ts → .mp4 (timeout: ${CONV_TIMEOUT}min)..."
-              CONV_START=$(date +%s)
-              if timeout ${CONV_TIMEOUT}m ffmpeg -nostdin -y -i "$VIDEO_FILE" \
-                   -c copy -movflags +faststart "$MP4_FILE" 2>&1 | tail -5; then
-                CONVERT_DURATION=$(( $(date +%s) - CONV_START ))
-                MP4_SIZE_H=$(du -h "$MP4_FILE" | cut -f1)
-                echo "  ✓ Converted in ${CONVERT_DURATION}s → $MP4_SIZE_H"
-              else
-                echo "  ✗ Conversion failed"
-                rm -f "$MP4_FILE"
-                FAILED=$((FAILED + 1))
-                continue
-              fi
-            fi
-
-            # Validate output
-            MP4_SIZE=$(stat -c%s "$MP4_FILE" 2>/dev/null || echo "0")
-            if [ "$MP4_SIZE" -lt 10240 ]; then
-              echo "  ✗ Output too small (${MP4_SIZE}B) — skipping"
-              rm -f "$MP4_FILE"
-              FAILED=$((FAILED + 1))
-              continue
-            fi
-
-            MP4_SIZE_MB=$(awk "BEGIN {printf \"%.0f\", $MP4_SIZE / 1048576}")
-
-            # ── Step 2: Upload to GoFile ───────────────────────────
-            echo "  Uploading to GoFile (${MP4_SIZE_MB}MB)..."
-
-            # Estimate upload time for sufficient disk check
-            UPLOAD_REMAINING=$(( MAX_JOB_TIME - $(date +%s) + JOB_START ))
-            EST_UPLOAD_SECS=$(( MP4_SIZE_MB / 2 + 600 ))  # ~2MB/s + 10min buffer
-            if [ "$UPLOAD_REMAINING" -lt "$EST_UPLOAD_SECS" ]; then
-              echo "  ⚠️  Not enough time for upload — deferring to next run"
-              continue
-            fi
-
-            UPLOAD_SUCCESS=false
-            DOWNLOAD_LINK=""
-            UPLOAD_DURATION=0
-            UPLOAD_SPEED="0"
-
+            LINK=""
             for RETRY in 1 2 3; do
-              if [ "$RETRY" -gt 1 ]; then
-                BACKOFF=$(( 5 * (2 ** (RETRY - 1)) + RANDOM % 5 ))
-                echo "  Retry $RETRY/3 (waiting ${BACKOFF}s)..."
-                sleep "$BACKOFF"
+              if [[ "$RETRY" -gt 1 ]]; then
+                SLEEP=$(( 10 * (2 ** (RETRY - 1)) ))
+                echo "  Retry $RETRY/3 (sleeping ${SLEEP}s)"
+                sleep "$SLEEP"
               fi
 
-              # Get best server
-              SERVER=$(curl -s --max-time 10 https://api.gofile.io/servers 2>/dev/null \
-                | jq -r '.data.servers[0].name // empty' 2>/dev/null)
-              SERVER="${SERVER:-store1}"
+              # Re-resolve best server each retry
+              SERVER=$(curl -sf --max-time 10 https://api.gofile.io/servers \
+                | jq -r '.data.servers[0].name // "store1"' 2>/dev/null || echo "$SERVER")
 
-              # Timeout: min 15min, max 180min
-              UL_TIMEOUT=$(awk "BEGIN {t=int($MP4_SIZE_MB/2/60)+15; print (t>180)?180:t}")
+              UL_TIMEOUT=$(awk "BEGIN{t=int($FSIZE/1048576/2)+30; print (t>180)?180:t}")
+              START=$(date +%s)
 
-              UL_START=$(date +%s)
-              RESPONSE=$(timeout ${UL_TIMEOUT}m curl -X POST \
+              RESP=$(timeout ${UL_TIMEOUT}m curl -sf -X POST \
                 "https://${SERVER}.gofile.io/contents/uploadfile" \
-                -F "file=@$MP4_FILE" \
-                -w '\n%{http_code}' \
-                -s 2>/dev/null || printf 'timeout\n000')
-              UL_END=$(date +%s)
+                ${GOFILE_TOKEN:+-H "Authorization: Bearer $GOFILE_TOKEN"} \
+                -F "file=@$FILE" 2>/dev/null || echo "")
 
-              HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-              BODY=$(echo "$RESPONSE" | head -n -1)
+              END=$(date +%s)
+              DUR=$(( END - START ))
 
-              if [ "$HTTP_CODE" = "200" ] && echo "$BODY" | jq -e '.status == "ok"' >/dev/null 2>&1; then
-                LINK=$(echo "$BODY" | jq -r '.data.downloadPage // empty' 2>/dev/null)
-                if [ -n "$LINK" ]; then
-                  UPLOAD_SUCCESS=true
-                  DOWNLOAD_LINK="$LINK"
-                  UPLOAD_DURATION=$(( UL_END - UL_START ))
-                  if [ "$UPLOAD_DURATION" -gt 0 ]; then
-                    UPLOAD_SPEED=$(awk "BEGIN {printf \"%.2f\", $MP4_SIZE / $UPLOAD_DURATION / 1048576}")
-                  fi
-                  echo "  ✓ Uploaded in ${UPLOAD_DURATION}s (${UPLOAD_SPEED} MB/s)"
-                  echo "  🔗 $LINK"
+              if echo "$RESP" | jq -e '.status == "ok"' >/dev/null 2>&1; then
+                LINK=$(echo "$RESP" | jq -r '.data.downloadPage // empty')
+                if [[ -n "$LINK" ]]; then
+                  SPEED=$(awk "BEGIN{printf \"%.2f\", $FSIZE/$DUR/1048576}" 2>/dev/null || echo "?")
+                  echo "  ✓ ${DUR}s @ ${SPEED} MB/s → $LINK"
                   break
                 fi
-              elif [ "$HTTP_CODE" = "429" ]; then
-                BACKOFF=$(( 10 * (2 ** (RETRY - 1)) + RANDOM % 10 ))
-                echo "  Rate limited — waiting ${BACKOFF}s"
-                sleep "$BACKOFF"
-              elif [ "$HTTP_CODE" = "000" ]; then
-                echo "  Timeout or network error"
-              else
-                echo "  HTTP $HTTP_CODE"
               fi
+
+              HTTP=$(echo "$RESP" | jq -r '.status // "unknown"' 2>/dev/null || echo "error")
+              echo "  ✗ attempt $RETRY failed (status: $HTTP)"
             done
 
-            # Try Python script as fallback if curl failed
-            if [ "$UPLOAD_SUCCESS" != "true" ]; then
-              echo "  Trying Python upload script as fallback..."
-              
-              if python3 upload_to_gofile.py "$MP4_FILE" 2>&1 | tee /tmp/python_upload.log; then
-                # Extract link from Python script output or JSON
-                if [ -f "database/backups/uploaded_links.json" ]; then
-                  LINK=$(jq -r ".uploads[-1].download_page // empty" database/backups/uploaded_links.json 2>/dev/null)
-                  if [ -n "$LINK" ]; then
-                    UPLOAD_SUCCESS=true
-                    DOWNLOAD_LINK="$LINK"
-                    echo "  ✓ Python upload succeeded"
-                    echo "  🔗 $LINK"
-                  fi
-                fi
-              fi
-            fi
-
-            if [ "$UPLOAD_SUCCESS" != "true" ]; then
-              echo "  ✗ Upload failed after 3 attempts (file preserved for next run)"
-              FAILED=$((FAILED + 1))
+            if [[ -z "$LINK" ]]; then
+              echo "  ✗ All retries failed for $FNAME — file preserved in artifact"
               continue
             fi
 
-            # ── Step 3: Record in database ─────────────────────────
-            DB_OK=false
-            RECORD=$(jq -n \
-              --arg id "${{ matrix.channel.username }}_$(date +%s)_$$" \
-              --arg user "${{ matrix.channel.username }}" \
-              --arg site "${{ matrix.channel.site }}" \
-              --arg file "$BASENAME" \
-              --arg link "$DOWNLOAD_LINK" \
-              --arg time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-              --argjson size "$MP4_SIZE" \
-              --argjson dur "$UPLOAD_DURATION" \
-              --argjson speed "$UPLOAD_SPEED" \
-              --argjson conv "$CONVERT_DURATION" \
-              '{
-                id: $id, username: $user, site: $site,
-                filename: $file, gofile_link: $link,
-                uploaded_at: $time, filesize_bytes: $size,
-                upload_duration: $dur, upload_speed: $speed,
-                convert_duration: $conv, status: "uploaded"
-              }')
+            # Build record JSON
+            REC=$(jq -n \
+              --arg id       "${USERNAME}_$(date +%s)_${RANDOM}" \
+              --arg user     "$USERNAME" \
+              --arg site     "$SITE" \
+              --arg file     "$FNAME" \
+              --arg link     "$LINK" \
+              --arg ts       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --argjson size "$FSIZE" \
+              '{id:$id, username:$user, site:$site, filename:$file,
+                gofile_link:$link, uploaded_at:$ts, filesize_bytes:$size,
+                status:"uploaded"}')
 
-            if jq ".records += [$RECORD]" "$STREAMER_DB/uploads.json" > "$STREAMER_DB/uploads.json.tmp" 2>/dev/null; then
-              mv "$STREAMER_DB/uploads.json.tmp" "$STREAMER_DB/uploads.json"
-              DB_OK=true
-              echo "  ✓ Database updated (legacy format)"
-            else
-              echo "  ⚠️  Database update failed — keeping files"
+            # Append to today's recordings file
+            REC_FILE="$DB_DIR/recordings.json"
+            if [[ ! -f "$REC_FILE" ]]; then
+              jq -n \
+                --arg date "$CURRENT_DATE" \
+                --arg user "$USERNAME" \
+                '{date:$date, username:$user, recordings:[], summary:{total_recordings:0,total_size_bytes:0}}' \
+                > "$REC_FILE"
             fi
-            
-            # Also save to new date-based structure
-            RECORDINGS_FILE="$STREAMER_DATE_DB/recordings.json"
-            if [ ! -f "$RECORDINGS_FILE" ]; then
-              echo "{\"date\":\"$CURRENT_DATE\",\"username\":\"${{ matrix.channel.username }}\",\"recordings\":[],\"summary\":{\"total_recordings\":0,\"total_size_bytes\":0,\"total_size_mb\":0.0,\"total_duration_seconds\":0,\"total_duration_minutes\":0.0,\"first_recording_time\":null,\"last_recording_time\":null}}" > "$RECORDINGS_FILE"
-            fi
-            
-            if jq ".recordings += [$RECORD]" "$RECORDINGS_FILE" > "$RECORDINGS_FILE.tmp" 2>/dev/null; then
-              mv "$RECORDINGS_FILE.tmp" "$RECORDINGS_FILE"
-              
-              # Update date summary
-              jq '
-                .summary.total_recordings = (.recordings | length) |
-                .summary.total_size_bytes = ([.recordings[].filesize_bytes] | add // 0) |
-                .summary.total_size_mb = ((.summary.total_size_bytes / 1048576) * 100 | round / 100) |
-                .summary.total_duration_seconds = ([.recordings[].duration_seconds] | add // 0) |
-                .summary.total_duration_minutes = ((.summary.total_duration_seconds / 60) * 100 | round / 100) |
-                .summary.first_recording_time = (.recordings[0].uploaded_at) |
-                .summary.last_recording_time = (.recordings[-1].uploaded_at)
-              ' "$RECORDINGS_FILE" > "$RECORDINGS_FILE.tmp"
-              mv "$RECORDINGS_FILE.tmp" "$RECORDINGS_FILE"
-              
-              DB_OK=true
-              echo "  ✓ Database updated (date-based: $CURRENT_DATE)"
-            fi
+            jq ".recordings += [$REC] | .summary.total_recordings = (.recordings|length) | .summary.total_size_bytes = ([.recordings[].filesize_bytes]|add//0)" \
+              "$REC_FILE" > "$REC_FILE.tmp" && mv "$REC_FILE.tmp" "$REC_FILE"
 
-            # ── Step 4: Cleanup ────────────────────────────────────
-            if [ "$DB_OK" = "true" ]; then
-              rm -f "$VIDEO_FILE"
-              [ "$MP4_FILE" != "$VIDEO_FILE" ] && rm -f "$MP4_FILE"
-              PROCESSED=$((PROCESSED + 1))
-              echo "  ✓ Cleaned up local files"
-            else
-              FAILED=$((FAILED + 1))
-            fi
+            rm -f "$FILE"
+            echo "  ✓ Cleaned up local file"
+          done
 
-          done < <(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) -size +1k 2>/dev/null | sort)
+          echo "Upload pass complete for $USERNAME"
 
-          # Cleanup processed dir
-          rm -rf processed
+      # ── Upload raw recordings as fallback artifact ──────────────────────
+      # Only non-empty if some uploads failed; gives the commit job something
+      # to retry on the next run.
+      - name: Upload failed recordings artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-videos-${{ matrix.channel.username }}-${{ matrix.channel.site }}
+          path: videos/mp4/
+          retention-days: 1
+          if-no-files-found: ignore
+          compression-level: 1
 
-          # ── Final report ─────────────────────────────────────────
-          echo ""
-          echo "╔══════════════════════════════════════════════════════╗"
-          echo "║  Processing Summary"
-          echo "╠══════════════════════════════════════════════════════╣"
-          echo "║  Processed: $PROCESSED  |  Failed: $FAILED"
-
-          # Show today's recordings
-          if [ -f "$STREAMER_DATE_DB/recordings.json" ]; then
-            TODAY_COUNT=$(jq '.summary.total_recordings' "$STREAMER_DATE_DB/recordings.json" 2>/dev/null || echo "0")
-            TODAY_SIZE=$(jq '.summary.total_size_mb' "$STREAMER_DATE_DB/recordings.json" 2>/dev/null || echo "0")
-            TODAY_DURATION=$(jq '.summary.total_duration_minutes' "$STREAMER_DATE_DB/recordings.json" 2>/dev/null || echo "0")
-            echo "║  Today ($CURRENT_DATE): $TODAY_COUNT recordings, ${TODAY_SIZE}MB, ${TODAY_DURATION}min"
-          fi
-          
-          # Show overall stats
-          if [ -f "$STREAMER_DB/stats.json" ]; then
-            TOTAL=$(jq '.statistics.total_recordings' "$STREAMER_DB/stats.json" 2>/dev/null || echo "0")
-            TOTAL_GB=$(jq '.statistics.total_size_gb' "$STREAMER_DB/stats.json" 2>/dev/null || echo "0")
-            TOTAL_DAYS=$(jq '.statistics.total_days_recorded' "$STREAMER_DB/stats.json" 2>/dev/null || echo "0")
-            echo "║  Total: $TOTAL recordings across $TOTAL_DAYS days (${TOTAL_GB}GB)"
-            echo "╠══════════════════════════════════════════════════════╣"
-            echo "║  Recent uploads:"
-            jq -r '.recordings[-5:] | .[] | "║    \(.filename) → \(.gofile_link)"' "$STREAMER_DATE_DB/recordings.json" 2>/dev/null || echo "║    (none)"
-          fi
-          echo "╚══════════════════════════════════════════════════════╝"
-
-          ELAPSED_M=$(( ( $(date +%s) - JOB_START ) / 60 ))
-          echo "Job duration: ${ELAPSED_M} minutes"
-
-
-
+      # ── DB artifact for commit job ──────────────────────────────────────
       - name: Upload database artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: uploads-db-${{ matrix.channel.username }}-${{ matrix.channel.site }}
+          name: db-${{ matrix.channel.username }}-${{ matrix.channel.site }}
           path: database/
-          retention-days: 30
+          retention-days: 7
           if-no-files-found: ignore
           compression-level: 9
 
   # ---------------------------------------------------------------------------
-  # RESTART — trigger the next workflow run for 24/7 operation
+  # COMMIT — merge all per-channel DB artifacts and push to repo (serial)
+  #
+  # Runs after ALL record jobs finish (success, failure, or skip).
+  # Keeps git history clean: one commit per workflow run.
   # ---------------------------------------------------------------------------
-  restart:
+  commit:
     if: "always() && !cancelled() && !startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true'"
-    needs: [setup, record, process]
+    needs: [setup, record]
     runs-on: ubuntu-latest
     permissions:
-      actions: write
       contents: write
+
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Download all databases
+      - name: Download all DB artifacts
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          pattern: uploads-db-*
-          path: db-artifacts
+          pattern: db-*
+          path: db-artifacts/
           merge-multiple: false
 
-      - name: Commit database to repo
+      - name: Merge and commit database
         run: |
           mkdir -p database
+          CHANGED=false
 
-          while IFS= read -r db; do
-            STREAMER_NAME=$(basename "$(dirname "$db")")
-            echo "Merging $db for $STREAMER_NAME..."
-            
-            STREAMER_DB_DIR="database/$STREAMER_NAME"
-            mkdir -p "$STREAMER_DB_DIR"
-            
-            if [ ! -f "$STREAMER_DB_DIR/uploads.json" ]; then
-              echo '{"records":[]}' > "$STREAMER_DB_DIR/uploads.json"
-            fi
-            
-            jq -s '{records: (.[0].records + .[1].records | unique_by(.id))}' "$STREAMER_DB_DIR/uploads.json" "$db" > db_tmp.json
-            mv db_tmp.json "$STREAMER_DB_DIR/uploads.json"
-          done < <(find db-artifacts -type f -name "uploads.json" 2>/dev/null)
+          if [[ -d db-artifacts ]]; then
+            # Each artifact is unpacked into db-artifacts/<artifact-name>/
+            find db-artifacts -mindepth 1 -maxdepth 1 -type d | while read -r ARTIFACT; do
+              # Structure inside: <username>/<date>/recordings.json
+              find "$ARTIFACT" -name "recordings.json" | while read -r REC_FILE; do
+                # Reconstruct path: database/<username>/<date>/recordings.json
+                REL="${REC_FILE#$ARTIFACT/}"  # e.g. hotchillylovers/2026-04-19/recordings.json
+                DEST="database/$REL"
+                DEST_DIR=$(dirname "$DEST")
+                mkdir -p "$DEST_DIR"
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add database/
-          
-          if git diff --staged --quiet; then
-            echo "No new database changes to commit."
-          else
-            git commit -m "chore: record new GoFile uploads [skip ci]"
-            git pull --rebase origin main
-            git push origin main
-            echo "✓ Database successfully committed to the repository!"
+                if [[ -f "$DEST" ]]; then
+                  # Merge: combine recordings arrays, deduplicate by .id
+                  jq -s '
+                    .[0] as $a | .[1] as $b |
+                    $a | .recordings = ([$a.recordings[], $b.recordings[]] | unique_by(.id)) |
+                    .summary.total_recordings = (.recordings|length) |
+                    .summary.total_size_bytes  = ([.recordings[].filesize_bytes]|add//0)
+                  ' "$DEST" "$REC_FILE" > "$DEST.tmp" && mv "$DEST.tmp" "$DEST"
+                  echo "Merged: $DEST"
+                else
+                  cp "$REC_FILE" "$DEST"
+                  echo "Added: $DEST"
+                fi
+              done
+            done
+            CHANGED=true
           fi
 
-      # Restore all per-channel streak counters from artifacts
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add database/ 2>/dev/null || true
+
+          if git diff --staged --quiet; then
+            echo "No database changes to commit."
+          else
+            git commit -m "chore: update recording database [skip ci]"
+            # Pull rebase in case another run pushed concurrently
+            git pull --rebase origin "${{ github.ref_name || 'main' }}" || true
+            git push origin "${{ github.ref_name || 'main' }}"
+            echo "✓ Database committed."
+          fi
+
+  # ---------------------------------------------------------------------------
+  # RESTART — trigger the next workflow run (24/7 loop)
+  #
+  # Depends on commit only (not on record outcome) so a failed recording
+  # channel cannot block the next cycle.
+  # Pauses auto-restart if ALL channels have been offline for > MAX_STREAK runs.
+  # Scheduled crons act as a circuit-breaker: they always fire and will
+  # automatically reset the restart chain if anything starts up again.
+  # ---------------------------------------------------------------------------
+  restart:
+    if: "always() && !cancelled() && !startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true'"
+    needs: [setup, record, commit]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+
+    steps:
+      - name: "Skip: run_once mode"
+        if: inputs.run_once == true
+        run: |
+          echo "🛑 run_once — no restart triggered."
+          exit 0
+
       - name: Download streak artifacts
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
           pattern: streak-*
-          path: downloaded-streaks
+          path: streaks/
           merge-multiple: true
 
-      - name: Evaluate restart
+      - name: Evaluate whether to restart
         id: eval
         run: |
-          # ── Input check: Run Once ──────────────────────────────────
-          if [ "${{ inputs.run_once }}" = "true" ]; then
-            echo "restart=false" >> $GITHUB_OUTPUT
-            echo "🛑 Run Once enabled — stopping workflow"
-            exit 0
+          # How many consecutive all-offline runs before pausing?
+          MAX_STREAK=72   # 72 × 5 h ≈ 15 days
+
+          TOTAL=0
+          OVER=0
+
+          if [[ -d streaks ]]; then
+            while IFS= read -r F; do
+              S=$(grep -oE '^[0-9]+' "$F" 2>/dev/null || echo "0")
+              TOTAL=$(( TOTAL + 1 ))
+              echo "  $(basename "$F"): streak=$S"
+              [[ "$S" -ge "$MAX_STREAK" ]] && OVER=$(( OVER + 1 ))
+            done < <(find streaks -name "*.txt" 2>/dev/null)
           fi
 
-          # ── Offline streak check ───────────────────────────────────
-          # If EVERY channel has been offline for more than MAX_OFFLINE_RUNS
-          # consecutive runs, stop restarting — the streamer(s) are likely
-          # on an extended break. The scheduled cron will still run and
-          # reset the streak the moment anyone comes back online.
-          #
-          # At 5h schedule: 72 runs ≈ 15 days
-          MAX_OFFLINE_RUNS=72
+          echo "Channels: total=$TOTAL over-limit=$OVER"
 
-          CHANNELS_TOTAL=0
-          CHANNELS_OVER_LIMIT=0
-
-          if [ -d downloaded-streaks ]; then
-            while IFS= read -r STREAK_FILE; do
-              STREAK=$(cat "$STREAK_FILE" 2>/dev/null | grep -oE '^[0-9]+' || echo "0")
-              CHANNELS_TOTAL=$((CHANNELS_TOTAL + 1))
-              echo "  $(basename $STREAK_FILE): streak=$STREAK"
-              if [ "$STREAK" -ge "$MAX_OFFLINE_RUNS" ]; then
-                CHANNELS_OVER_LIMIT=$((CHANNELS_OVER_LIMIT + 1))
-              fi
-            done < <(find downloaded-streaks -type f -name "*.txt" 2>/dev/null)
-          fi
-
-          echo "Channels total: $CHANNELS_TOTAL | Over limit: $CHANNELS_OVER_LIMIT"
-
-          if [ "$CHANNELS_TOTAL" -gt 0 ] && [ "$CHANNELS_TOTAL" -eq "$CHANNELS_OVER_LIMIT" ]; then
-            echo "restart=false" >> $GITHUB_OUTPUT
-            echo "🛑 All channels offline for 15+ days — pausing auto-restart"
-            echo "   Scheduled crons will continue to run naturally."
-            echo "   Streak will reset automatically when any streamer goes live."
+          if [[ "$TOTAL" -gt 0 && "$TOTAL" -eq "$OVER" ]]; then
+            echo "restart=false" >> "$GITHUB_OUTPUT"
+            echo "🛑 All $TOTAL channel(s) have been offline for $MAX_STREAK+ runs."
+            echo "   Auto-restart paused. Scheduled crons will still fire."
           else
-            echo "restart=true" >> $GITHUB_OUTPUT
-            if [ "$CHANNELS_OVER_LIMIT" -gt 0 ]; then
-              echo "ℹ️  $CHANNELS_OVER_LIMIT/$CHANNELS_TOTAL channels over streak limit (others still active)"
-            fi
+            echo "restart=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Restart approved."
           fi
 
-      - name: Wait before restart
+      - name: Random delay (avoid exact-second collisions)
         if: steps.eval.outputs.restart == 'true'
         run: |
-          DELAY=$((30 + RANDOM % 61))
-          echo "Waiting ${DELAY}s before restart..."
-          sleep $DELAY
+          DELAY=$(( 30 + RANDOM % 90 ))
+          echo "Sleeping ${DELAY}s…"
+          sleep "$DELAY"
 
       - name: Trigger next run
         if: steps.eval.outputs.restart == 'true'
         uses: actions/github-script@v7
-        continue-on-error: true
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           retries: 3
           script: |
-            // Determine the correct branch
+            // Resolve the branch we are currently running on
             let branch = 'main';
-
             if (context.ref?.startsWith('refs/heads/')) {
               branch = context.ref.replace('refs/heads/', '');
-            } else if (context.payload?.ref?.startsWith('refs/heads/')) {
-              branch = context.payload.ref.replace('refs/heads/', '');
             } else {
               try {
                 const repo = await github.rest.repos.get({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo
+                  owner: context.repo.owner, repo: context.repo.repo
                 });
                 branch = repo.data.default_branch;
-              } catch (e) {
-                console.log(`Falling back to 'main': ${e.message}`);
-              }
+              } catch { /* keep 'main' */ }
             }
 
-            console.log(`Restarting on branch: ${branch}`);
+            console.log(`↻ Restarting on branch: ${branch}`);
 
             for (let i = 0; i < 3; i++) {
               try {
                 await github.rest.actions.createWorkflowDispatch({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
+                  owner:       context.repo.owner,
+                  repo:        context.repo.repo,
                   workflow_id: 'release.yml',
-                  ref: branch,
+                  ref:         branch,
                   inputs: {
                     max_duration: "${{ inputs.max_duration || '45' }}",
-                    resolution: "${{ inputs.resolution || '9999' }}",
-                    framerate: "${{ inputs.framerate || '60' }}",
-                    interval: "${{ inputs.interval || '1' }}",
-                    debug: "${{ inputs.debug }}",
-                    run_once: "false"
+                    resolution:   "${{ inputs.resolution   || '9999' }}",
+                    framerate:    "${{ inputs.framerate    || '60' }}",
+                    interval:     "${{ inputs.interval     || '1' }}",
+                    debug:        "${{ inputs.debug        || 'false' }}",
+                    run_once:     "false"
                   }
                 });
-                console.log('✓ Restart triggered successfully');
+                console.log('✓ Next run triggered.');
                 return;
-              } catch (error) {
-                console.log(`Attempt ${i + 1}/3 failed: ${error.message}`);
-                if (error.status === 403 && error.message.includes('rate limit')) {
-                  await new Promise(r => setTimeout(r, 30000));
-                } else if (i < 2) {
-                  const backoff = 5000 * Math.pow(2, i) + Math.random() * 2000;
-                  await new Promise(r => setTimeout(r, backoff));
-                }
+              } catch (err) {
+                console.log(`  Attempt ${i+1}/3 failed: ${err.message}`);
+                await new Promise(r => setTimeout(r, 5000 * Math.pow(2, i)));
               }
             }
-
-            core.warning('Failed to trigger restart — will resume on next scheduled cron');
+            core.warning('Could not trigger restart — scheduled cron will resume the loop.');

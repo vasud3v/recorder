@@ -50,10 +50,17 @@ func PostChaturbateAPI(ctx context.Context, username, csrfToken string) (string,
 	req.Header.Set("Referer", fmt.Sprintf("https://chaturbate.com/%s", username))
 	req.Header.Set("Origin", "https://chaturbate.com")
 	
-	// Add cookies
+	// Add cookies - sanitize to remove any invalid characters
 	cookieStr := fmt.Sprintf("csrftoken=%s", csrfToken)
 	if server.Config.Cookies != "" {
-		cookieStr = server.Config.Cookies + "; " + cookieStr
+		// Remove any newlines, carriage returns, or other control characters
+		sanitized := strings.Map(func(r rune) rune {
+			if r == '\n' || r == '\r' || r == '\t' || r < 32 {
+				return -1 // drop the character
+			}
+			return r
+		}, server.Config.Cookies)
+		cookieStr = sanitized + "; " + cookieStr
 	}
 	req.Header.Set("Cookie", cookieStr)
 	

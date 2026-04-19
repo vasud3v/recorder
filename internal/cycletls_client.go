@@ -45,9 +45,16 @@ func (c *CycleTLSReq) Get(ctx context.Context, url string) (string, error) {
 	headers["Sec-Ch-Ua-Platform"] = `"Windows"`
 	headers["X-Requested-With"] = "XMLHttpRequest"
 	
-	// Add cookies
+	// Add cookies - sanitize to remove invalid characters
 	if server.Config.Cookies != "" {
-		headers["Cookie"] = server.Config.Cookies
+		// Remove any newlines, carriage returns, or other control characters
+		sanitized := strings.Map(func(r rune) rune {
+			if r == '\n' || r == '\r' || r == '\t' || r < 32 {
+				return -1 // drop the character
+			}
+			return r
+		}, server.Config.Cookies)
+		headers["Cookie"] = sanitized
 	}
 	
 	// Make request with Chrome 120 fingerprint
@@ -112,10 +119,17 @@ func (c *CycleTLSReq) Post(ctx context.Context, url, username, csrfToken string)
 	headers["X-CSRFToken"] = csrfToken
 	headers["Referer"] = fmt.Sprintf("https://chaturbate.com/%s", username)
 	
-	// Add cookies including CSRF token
+	// Add cookies including CSRF token - sanitize to remove invalid characters
 	cookieStr := fmt.Sprintf("csrftoken=%s", csrfToken)
 	if server.Config.Cookies != "" {
-		cookieStr = server.Config.Cookies + "; " + cookieStr
+		// Remove any newlines, carriage returns, or other control characters
+		sanitized := strings.Map(func(r rune) rune {
+			if r == '\n' || r == '\r' || r == '\t' || r < 32 {
+				return -1 // drop the character
+			}
+			return r
+		}, server.Config.Cookies)
+		cookieStr = sanitized + "; " + cookieStr
 	}
 	headers["Cookie"] = cookieStr
 	

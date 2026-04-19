@@ -503,11 +503,12 @@ jobs:
       - name: Process and upload to GoFile
         if: steps.download.outcome == 'success'
         run: |
-          mkdir -p database processed
+          STREAMER_DB="database/${{ matrix.channel.username }}"
+          mkdir -p "$STREAMER_DB" processed
 
           # Initialize database if missing
-          if [ ! -f database/uploads.json ]; then
-            echo '{"records":[]}' > database/uploads.json
+          if [ ! -f "$STREAMER_DB/uploads.json" ]; then
+            echo '{"records":[]}' > "$STREAMER_DB/uploads.json"
           fi
 
           # Find all video files (skip anything < 1KB)
@@ -682,8 +683,8 @@ jobs:
                 convert_duration: $conv, status: "uploaded"
               }')
 
-            if jq ".records += [$RECORD]" database/uploads.json > database/uploads.json.tmp 2>/dev/null; then
-              mv database/uploads.json.tmp database/uploads.json
+            if jq ".records += [$RECORD]" "$STREAMER_DB/uploads.json" > "$STREAMER_DB/uploads.json.tmp" 2>/dev/null; then
+              mv "$STREAMER_DB/uploads.json.tmp" "$STREAMER_DB/uploads.json"
               DB_OK=true
               echo "  ✓ Database updated"
             else
@@ -712,14 +713,14 @@ jobs:
           echo "╠══════════════════════════════════════════════════════╣"
           echo "║  Processed: $PROCESSED  |  Failed: $FAILED"
 
-          if [ -f database/uploads.json ]; then
-            TOTAL=$(jq '.records | length' database/uploads.json 2>/dev/null || echo "0")
-            TOTAL_BYTES=$(jq '[.records[].filesize_bytes] | add // 0' database/uploads.json 2>/dev/null || echo "0")
+          if [ -f "$STREAMER_DB/uploads.json" ]; then
+            TOTAL=$(jq '.records | length' "$STREAMER_DB/uploads.json" 2>/dev/null || echo "0")
+            TOTAL_BYTES=$(jq '[.records[].filesize_bytes] | add // 0' "$STREAMER_DB/uploads.json" 2>/dev/null || echo "0")
             TOTAL_GB=$(awk "BEGIN {printf \"%.2f\", $TOTAL_BYTES / 1073741824}")
             echo "║  Total DB records: $TOTAL  |  Total uploaded: ${TOTAL_GB}GB"
             echo "╠══════════════════════════════════════════════════════╣"
             echo "║  Recent uploads:"
-            jq -r '.records[-5:] | .[] | "║    \(.filename) → \(.gofile_link)"' database/uploads.json 2>/dev/null || echo "║    (none)"
+            jq -r '.records[-5:] | .[] | "║    \(.filename) → \(.gofile_link)"' "$STREAMER_DB/uploads.json" 2>/dev/null || echo "║    (none)"
           fi
           echo "╚══════════════════════════════════════════════════════╝"
 
@@ -764,19 +765,25 @@ jobs:
       - name: Commit database to repo
         run: |
           mkdir -p database
-          if [ ! -f database/uploads.json ]; then
-            echo '{"records":[]}' > database/uploads.json
-          fi
 
           while IFS= read -r db; do
-            echo "Merging $db..."
-            jq -s '{records: (.[0].records + .[1].records | unique_by(.id))}' database/uploads.json "$db" > db_tmp.json
-            mv db_tmp.json database/uploads.json
+            STREAMER_NAME=$(basename "$(dirname "$db")")
+            echo "Merging $db for $STREAMER_NAME..."
+            
+            STREAMER_DB_DIR="database/$STREAMER_NAME"
+            mkdir -p "$STREAMER_DB_DIR"
+            
+            if [ ! -f "$STREAMER_DB_DIR/uploads.json" ]; then
+              echo '{"records":[]}' > "$STREAMER_DB_DIR/uploads.json"
+            fi
+            
+            jq -s '{records: (.[0].records + .[1].records | unique_by(.id))}' "$STREAMER_DB_DIR/uploads.json" "$db" > db_tmp.json
+            mv db_tmp.json "$STREAMER_DB_DIR/uploads.json"
           done < <(find db-artifacts -type f -name "uploads.json" 2>/dev/null)
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add database/uploads.json
+          git add database/
           
           if git diff --staged --quiet; then
             echo "No new database changes to commit."

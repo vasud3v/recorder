@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/HeapOfChaos/goondvr/chaturbate"
-	"github.com/HeapOfChaos/goondvr/database"
 	"github.com/HeapOfChaos/goondvr/server"
 	"github.com/HeapOfChaos/goondvr/uploader"
 )
@@ -323,102 +322,13 @@ func (ch *Channel) finalizeRecording(filename string) {
 			ch.Error("gofile upload failed for `%s`: %s", finalPath, err.Error())
 			ch.Info("keeping local file because upload failed")
 			
-			// Log failed upload to database
-			db := database.GetDB()
-			ch.Info("database has %d existing records", len(db.GetRecords()))
-			
-			fileInfo, statErr := os.Stat(finalPath)
-			filesize := int64(0)
-			if statErr == nil && fileInfo != nil {
-				filesize = fileInfo.Size()
-			}
-			
-			recordID := fmt.Sprintf("%s_%d", ch.Config.Username, time.Now().UnixNano())
-			ch.Info("creating failed upload record with ID: %s", recordID)
-			
-			if addErr := db.AddRecord(database.VideoRecord{
-				ID:             recordID,
-				Username:       ch.Config.Username,
-				Site:           ch.Config.Site,
-				ChannelID:      fmt.Sprintf("%s__%s", ch.Config.Site, ch.Config.Username),
-				Filename:       filepath.Base(finalPath),
-				OriginalPath:   finalPath,
-				UploadedAt:     time.Now(),
-				RecordedAt:     time.Unix(ch.StreamedAt, 0),
-				GoFileLink:     "",
-				Duration:       ch.Duration,
-				FilesizeBytes:  filesize,
-				Resolution:     ch.Config.Resolution,
-				Framerate:      ch.Config.Framerate,
-				RoomTitle:      ch.RoomTitle,
-				Gender:         ch.Gender,
-				UploadDuration: uploadDuration,
-				UploadSpeed:    0,
-				Status:         "failed",
-				ErrorMessage:   err.Error(),
-			}); addErr != nil {
-				ch.Error("failed to save failed upload record: %s", addErr.Error())
-			} else {
-				ch.Info("failed upload logged to database (now %d records)", len(db.GetRecords()))
-			}
+			// Database logging disabled for GitHub Actions compatibility
+			// Failed uploads are tracked in workflow database instead
 		} else {
 			ch.Info("upload successful: %s", downloadLink)
 			
-			// Get file info for database record
-			db := database.GetDB()
-			ch.Info("database has %d existing records", len(db.GetRecords()))
-			
-			fileInfo, statErr := os.Stat(finalPath)
-			filesize := int64(0)
-			uploadSpeed := 0.0
-			if statErr == nil && fileInfo != nil {
-				filesize = fileInfo.Size()
-				if uploadDuration > 0 {
-					uploadSpeed = float64(filesize) / uploadDuration / 1024 / 1024 // MB/s
-				}
-			} else if statErr != nil {
-				ch.Error("failed to stat file for database record: %s", statErr.Error())
-			}
-			
-			recordID := fmt.Sprintf("%s_%d", ch.Config.Username, time.Now().UnixNano())
-			ch.Info("creating upload record with ID: %s", recordID)
-			
-			// Store in database
-			record := database.VideoRecord{
-				ID:             recordID,
-				Username:       ch.Config.Username,
-				Site:           ch.Config.Site,
-				ChannelID:      fmt.Sprintf("%s__%s", ch.Config.Site, ch.Config.Username),
-				Filename:       filepath.Base(finalPath),
-				OriginalPath:   finalPath,
-				UploadedAt:     time.Now(),
-				RecordedAt:     time.Unix(ch.StreamedAt, 0),
-				GoFileLink:     downloadLink,
-				Duration:       ch.Duration,
-				FilesizeBytes:  filesize,
-				Resolution:     ch.Config.Resolution,
-				Framerate:      ch.Config.Framerate,
-				RoomTitle:      ch.RoomTitle,
-				Gender:         ch.Gender,
-				UploadDuration: uploadDuration,
-				UploadSpeed:    uploadSpeed,
-				Status:         "uploaded",
-			}
-			
-			if err := db.AddRecord(record); err != nil {
-				ch.Error("failed to save record to database: %s", err.Error())
-			} else {
-				ch.Info("video record saved to database (now %d records)", len(db.GetRecords()))
-				// Create backup every 10 uploads
-				records := db.GetRecords()
-				if len(records) > 0 && len(records)%10 == 0 {
-					if backupErr := db.Backup(); backupErr != nil {
-						ch.Error("failed to create database backup: %s", backupErr.Error())
-					} else {
-						ch.Info("database backup created")
-					}
-				}
-			}
+			// Database logging disabled for GitHub Actions compatibility
+			// Successful uploads are tracked in workflow database instead
 			
 			// Delete local file after successful upload
 			if err := os.Remove(finalPath); err != nil {
@@ -491,81 +401,13 @@ func (ch *Channel) finalizeRecordingAsync(filename string) {
 			ch.Error("gofile upload failed for `%s`: %s", finalPath, err.Error())
 			ch.Info("keeping local file because upload failed")
 			
-			// Log failed upload to database
-			db := database.GetDB()
-			fileInfo, _ := os.Stat(finalPath)
-			filesize := int64(0)
-			if fileInfo != nil {
-				filesize = fileInfo.Size()
-			}
-			
-			_ = db.AddRecord(database.VideoRecord{
-				ID:             fmt.Sprintf("%s_%d", ch.Config.Username, time.Now().Unix()),
-				Username:       ch.Config.Username,
-				Site:           ch.Config.Site,
-				ChannelID:      fmt.Sprintf("%s__%s", ch.Config.Site, ch.Config.Username),
-				Filename:       filepath.Base(finalPath),
-				OriginalPath:   finalPath,
-				UploadedAt:     time.Now(),
-				RecordedAt:     time.Unix(ch.StreamedAt, 0),
-				GoFileLink:     "",
-				Duration:       ch.Duration,
-				FilesizeBytes:  filesize,
-				Resolution:     ch.Config.Resolution,
-				Framerate:      ch.Config.Framerate,
-				RoomTitle:      ch.RoomTitle,
-				Gender:         ch.Gender,
-				UploadDuration: uploadDuration,
-				UploadSpeed:    0,
-				Status:         "failed",
-				ErrorMessage:   err.Error(),
-			})
+			// Database logging disabled for GitHub Actions compatibility
+			// Failed uploads are tracked in workflow database instead
 		} else {
 			ch.Info("upload successful: %s", downloadLink)
 			
-			// Get file info for database record
-			fileInfo, _ := os.Stat(finalPath)
-			filesize := int64(0)
-			uploadSpeed := 0.0
-			if fileInfo != nil {
-				filesize = fileInfo.Size()
-				if uploadDuration > 0 {
-					uploadSpeed = float64(filesize) / uploadDuration / 1024 / 1024 // MB/s
-				}
-			}
-			
-			// Store in database
-			db := database.GetDB()
-			record := database.VideoRecord{
-				ID:             fmt.Sprintf("%s_%d", ch.Config.Username, time.Now().Unix()),
-				Username:       ch.Config.Username,
-				Site:           ch.Config.Site,
-				ChannelID:      fmt.Sprintf("%s__%s", ch.Config.Site, ch.Config.Username),
-				Filename:       filepath.Base(finalPath),
-				OriginalPath:   finalPath,
-				UploadedAt:     time.Now(),
-				RecordedAt:     time.Unix(ch.StreamedAt, 0),
-				GoFileLink:     downloadLink,
-				Duration:       ch.Duration,
-				FilesizeBytes:  filesize,
-				Resolution:     ch.Config.Resolution,
-				Framerate:      ch.Config.Framerate,
-				RoomTitle:      ch.RoomTitle,
-				Gender:         ch.Gender,
-				UploadDuration: uploadDuration,
-				UploadSpeed:    uploadSpeed,
-				Status:         "uploaded",
-			}
-			
-			if err := db.AddRecord(record); err != nil {
-				ch.Error("failed to save record to database: %s", err.Error())
-			} else {
-				ch.Info("video record saved to database")
-				// Create backup every 10 uploads
-				if len(db.GetRecords()) % 10 == 0 {
-					_ = db.Backup()
-				}
-			}
+			// Database logging disabled for GitHub Actions compatibility
+			// Successful uploads are tracked in workflow database instead
 			
 			// Step 3: Delete local file after successful upload
 			ch.Info("deleting local file `%s`...", filepath.Base(finalPath))

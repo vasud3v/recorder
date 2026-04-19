@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/HeapOfChaos/goondvr/database"
 	"github.com/HeapOfChaos/goondvr/entity"
 	"github.com/HeapOfChaos/goondvr/internal"
 	"github.com/HeapOfChaos/goondvr/manager"
@@ -217,66 +216,43 @@ func UpdateConfig(c *gin.Context) {
 }
 
 // GetVideos returns all uploaded video records as JSON
+// DISABLED: Database package removed for GitHub Actions compatibility
 func GetVideos(c *gin.Context) {
-	db := database.GetDB()
-	records := db.GetRecords()
-	c.JSON(http.StatusOK, records)
+	c.JSON(http.StatusOK, gin.H{"error": "database functionality disabled"})
 }
 
 // GetVideosByUsername returns all uploaded video records for a specific username
+// DISABLED: Database package removed for GitHub Actions compatibility
 func GetVideosByUsername(c *gin.Context) {
-	username := c.Param("username")
-	db := database.GetDB()
-	records := db.GetRecordsByUsername(username)
-	c.JSON(http.StatusOK, records)
+	c.JSON(http.StatusOK, gin.H{"error": "database functionality disabled"})
 }
 
 // GetVideosBySite returns all uploaded video records for a specific site
+// DISABLED: Database package removed for GitHub Actions compatibility
 func GetVideosBySite(c *gin.Context) {
-	site := c.Param("site")
-	db := database.GetDB()
-	records := db.GetRecordsBySite(site)
-	c.JSON(http.StatusOK, records)
+	c.JSON(http.StatusOK, gin.H{"error": "database functionality disabled"})
 }
 
 // GetVideoByID returns a specific video record by ID
+// DISABLED: Database package removed for GitHub Actions compatibility
 func GetVideoByID(c *gin.Context) {
-	id := c.Param("id")
-	db := database.GetDB()
-	record, err := db.GetRecordByID(id)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, record)
+	c.JSON(http.StatusNotFound, gin.H{"error": "database functionality disabled"})
 }
 
 // GetDatabaseStats returns database statistics
+// DISABLED: Database package removed for GitHub Actions compatibility
 func GetDatabaseStats(c *gin.Context) {
-	db := database.GetDB()
-	stats := db.GetStats()
-	c.JSON(http.StatusOK, stats)
+	c.JSON(http.StatusOK, gin.H{"error": "database functionality disabled"})
 }
 
 // SearchVideos searches videos by query string
+// DISABLED: Database package removed for GitHub Actions compatibility
 func SearchVideos(c *gin.Context) {
-	query := c.Query("q")
-	if query == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "query parameter 'q' is required"})
-		return
-	}
-	
-	db := database.GetDB()
-	records := db.Search(query)
-	c.JSON(http.StatusOK, records)
+	c.JSON(http.StatusOK, gin.H{"error": "database functionality disabled"})
 }
 
 // BackupDatabase creates a backup of the database
+// DISABLED: Database package removed for GitHub Actions compatibility
 func BackupDatabase(c *gin.Context) {
-	db := database.GetDB()
-	if err := db.Backup(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "backup created successfully"})
+	c.JSON(http.StatusOK, gin.H{"message": "database functionality disabled"})
 }

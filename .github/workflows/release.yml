@@ -5,8 +5,8 @@ env:
 
 # Prevent multiple workflows from running simultaneously
 concurrency:
-  group: ${{ github.event_name == 'workflow_dispatch' && format('goondvr-manual-{0}', github.run_id) || 'goondvr-recording' }}
-  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}  # Cancel old manual runs, queue scheduled runs
+  group: goondvr-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
 on:
   push:
@@ -217,22 +217,31 @@ jobs:
       - name: Wait for FlareSolverr
         run: |
           echo "Waiting for FlareSolverr to be ready..."
-          for i in {1..30}; do
-            if curl -s http://localhost:8191/v1 > /dev/null 2>&1; then
+          FLARE_READY=false
+          for i in {1..60}; do
+            if curl -s --max-time 5 http://localhost:8191/v1 > /dev/null 2>&1; then
               echo "FlareSolverr is ready!"
+              FLARE_READY=true
               break
             fi
-            echo "Waiting... ($i/30)"
-            sleep 2
+            echo "Waiting... ($i/60)"
+            sleep 3
           done
+          
+          if [ "$FLARE_READY" = "false" ]; then
+            echo "ERROR: FlareSolverr failed to start after 3 minutes"
+            exit 1
+          fi
           
           # Test FlareSolverr with appropriate timeout
           echo "Testing FlareSolverr..."
-          curl -s --max-time 90 -X POST http://localhost:8191/v1 \
+          if ! curl -s --max-time 90 -X POST http://localhost:8191/v1 \
             -H "Content-Type: application/json" \
-            -d '{"cmd":"request.get","url":"https://chaturbate.com","maxTimeout":60000}' | jq . || {
-              echo "⚠️  FlareSolverr test failed or timed out"
-            }
+            -d '{"cmd":"request.get","url":"https://chaturbate.com","maxTimeout":60000}' | jq -e '.status == "ok"' > /dev/null 2>&1; then
+            echo "⚠️  FlareSolverr test failed - continuing anyway"
+          else
+            echo "✓ FlareSolverr test passed"
+          fi
       
       - name: Record
         id: record
@@ -252,13 +261,17 @@ jobs:
             echo "======================="
           fi
           
-          # Check available disk space
+          # Check available disk space (account for parallel jobs)
           echo "=== Disk Space Check ==="
-          AVAILABLE_GB=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
-          echo "Available disk space: ${AVAILABLE_GB}GB"
+          AVAILABLE_GB=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//' || echo "0")
+          TOTAL_DISK=$(df -BG . | awk 'NR==2 {print $2}' | sed 's/G//' || echo "14")
+          echo "Available disk space: ${AVAILABLE_GB}GB / ${TOTAL_DISK}GB"
           
-          if [ "$AVAILABLE_GB" -lt 3 ]; then
-            echo "ERROR: Insufficient disk space (need at least 3GB, have ${AVAILABLE_GB}GB)"
+          # With parallel jobs, ensure we have reasonable space per job
+          # Minimum 2GB per job to be safe
+          if [ "$AVAILABLE_GB" -lt 2 ]; then
+            echo "ERROR: Insufficient disk space (need at least 2GB, have ${AVAILABLE_GB}GB)"
+            echo "This may be due to parallel jobs consuming disk space"
             exit 1
           fi
           
@@ -266,18 +279,18 @@ jobs:
           echo "========================"
           
           # Sanitize cookies - remove any newlines or control characters
-          CLEAN_COOKIES=$(echo "$COOKIES" | tr -d '\n\r\t' | tr -s ' ')
-          CLEAN_UA=$(echo "$USER_AGENT" | tr -d '\n\r\t' | tr -s ' ')
+          CLEAN_COOKIES=$(echo "$COOKIES" | tr -d '\n\r\t' | tr -s ' ' || echo "")
+          CLEAN_UA=$(echo "$USER_AGENT" | tr -d '\n\r\t' | tr -s ' ' || echo "")
           
           # Check if secrets are configured
           if [ -z "$CLEAN_COOKIES" ] || [ "$CLEAN_COOKIES" = " " ]; then
             echo "⚠️  WARNING: CHATURBATE_COOKIES secret is empty or not set"
-            echo "Some features may not work without authentication"
+            echo "Recording may work for public streams, but private streams will fail"
           fi
           
           if [ -z "$CLEAN_UA" ] || [ "$CLEAN_UA" = " " ]; then
             echo "⚠️  WARNING: USER_AGENT secret is empty or not set"
-            CLEAN_UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            CLEAN_UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             echo "Using default user agent"
           fi
           
@@ -306,8 +319,12 @@ jobs:
           
           # Start background monitor for disk space and file marking
           (
+            # Trap to ensure cleanup on exit
+            trap 'echo "Monitor process exiting..."; exit 0' SIGTERM SIGINT
+            
             RECORDING_STARTED=false
             OFFLINE_COUNT=0
+            PREV_TOTAL_SIZE=0
             
             # For very short recordings (1-5 min), stop after 1 offline check
             # For longer recordings, stop after 3 offline checks
@@ -335,27 +352,28 @@ jobs:
               sleep 60  # Check every minute
               
               # Monitor disk space
-              AVAILABLE_GB=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
-              USED_PERCENT=$(df -h . | awk 'NR==2 {print $5}' | sed 's/%//')
+              AVAILABLE_GB=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//' || echo "0")
+              USED_PERCENT=$(df -h . | awk 'NR==2 {print $5}' | sed 's/%//' || echo "0")
               
               # Show current recording status
               echo "=== Recording Status ($(date)) ==="
               echo "Disk: ${AVAILABLE_GB}GB available (${USED_PERCENT}% used)"
               
-              # Check if we have any video files
+              # Check total size of video files to detect active recording
+              CURRENT_TOTAL_SIZE=$(du -sb videos 2>/dev/null | cut -f1 || echo "0")
               VIDEO_COUNT=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l || echo "0")
               
               if [ "$VIDEO_COUNT" -gt 0 ]; then
                 RECORDING_STARTED=true
-                OFFLINE_COUNT=0  # Reset offline count when we have files
                 find videos -type f \( -name "*.ts" -o -name "*.mp4" \) -exec ls -lh {} \; 2>/dev/null | head -10
-              else
-                echo "No files yet"
                 
-                # If recording started but now no new files, increment offline counter
-                if [ "$RECORDING_STARTED" = "true" ]; then
+                # Check if data is still being written (total size growing)
+                if [ "$CURRENT_TOTAL_SIZE" -gt "$PREV_TOTAL_SIZE" ]; then
+                  OFFLINE_COUNT=0  # Reset - actively recording
+                else
+                  # Size not growing - stream may have ended
                   OFFLINE_COUNT=$((OFFLINE_COUNT + 1))
-                  echo "⚠️  No activity detected (check $OFFLINE_COUNT/$MAX_OFFLINE_CHECKS)"
+                  echo "⚠️  No new data detected (check $OFFLINE_COUNT/$MAX_OFFLINE_CHECKS)"
                   
                   if [ $OFFLINE_COUNT -ge $MAX_OFFLINE_CHECKS ]; then
                     echo "🛑 Stream appears to have ended - stopping recording to process files"
@@ -363,6 +381,9 @@ jobs:
                     break
                   fi
                 fi
+                PREV_TOTAL_SIZE=$CURRENT_TOTAL_SIZE
+              else
+                echo "No files yet"
               fi
               
               echo "================================"
@@ -520,15 +541,26 @@ jobs:
             echo "Recording wrapper ended with code $EXIT_CODE"
           }
           
-          # Stop the background monitor
+          # Stop the background monitor gracefully
           echo "Stopping background monitor..."
-          kill $UPLOADER_PID 2>/dev/null || true
-          sleep 2
-          
-          # Force kill if still running
           if kill -0 $UPLOADER_PID 2>/dev/null; then
-            echo "Force killing monitor process..."
-            kill -9 $UPLOADER_PID 2>/dev/null || true
+            kill -TERM $UPLOADER_PID 2>/dev/null || true
+            
+            # Wait up to 10 seconds for graceful shutdown
+            for i in {1..10}; do
+              if ! kill -0 $UPLOADER_PID 2>/dev/null; then
+                echo "Monitor stopped gracefully"
+                break
+              fi
+              sleep 1
+            done
+            
+            # Force kill if still running
+            if kill -0 $UPLOADER_PID 2>/dev/null; then
+              echo "Force killing monitor process..."
+              kill -9 $UPLOADER_PID 2>/dev/null || true
+              sleep 1
+            fi
           fi
           
           echo ""
@@ -582,20 +614,24 @@ jobs:
         run: |
           if [ -d videos ]; then
             TOTAL_SIZE=$(du -sb videos 2>/dev/null | cut -f1 || echo "0")
-            TOTAL_GB=$(echo "scale=2; $TOTAL_SIZE / 1024 / 1024 / 1024" | bc)
+            
+            # Ensure bc is available and handle errors
+            if command -v bc &> /dev/null && [ "$TOTAL_SIZE" -gt 0 ]; then
+              TOTAL_GB=$(echo "scale=2; $TOTAL_SIZE / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
+            else
+              TOTAL_GB=$(awk "BEGIN {printf \"%.2f\", $TOTAL_SIZE / 1024 / 1024 / 1024}")
+            fi
+            
             echo "Total artifact size: ${TOTAL_GB}GB"
             echo "size_gb=$TOTAL_GB" >> $GITHUB_OUTPUT
             
-            # Warn if approaching 10GB limit
-            if (( $(echo "$TOTAL_GB > 8" | bc -l) )); then
-              echo "⚠️  WARNING: Artifact size (${TOTAL_GB}GB) approaching 10GB limit"
-              echo "Consider splitting into multiple artifacts"
-            fi
+            # Use awk for comparison to avoid bc dependency issues
+            NEEDS_SPLIT=$(awk "BEGIN {print ($TOTAL_GB > 8.5) ? \"true\" : \"false\"}")
             
-            # Check if we need to split
-            if (( $(echo "$TOTAL_GB > 9" | bc -l) )); then
+            if [ "$NEEDS_SPLIT" = "true" ]; then
+              echo "⚠️  WARNING: Artifact size (${TOTAL_GB}GB) approaching 10GB limit"
               echo "needs_split=true" >> $GITHUB_OUTPUT
-              echo "🔀 Artifact too large, will split into chunks"
+              echo "🔀 Artifact too large, will clean up old files"
             else
               echo "needs_split=false" >> $GITHUB_OUTPUT
             fi
@@ -608,7 +644,7 @@ jobs:
         if: always() && steps.check-size.outputs.needs_split != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: raw-videos-${{ matrix.channel.username }}-${{ github.run_number }}
+          name: raw-videos-${{ matrix.channel.username }}-${{ matrix.channel.site }}-${{ github.run_number }}-${{ strategy.job-index }}
           path: |
             videos/**/*.ts
             videos/**/*.mp4
@@ -626,6 +662,7 @@ jobs:
           TARGET_SIZE=$((8 * 1024 * 1024 * 1024))  # 8GB target
           MAX_ITERATIONS=100  # Safety limit to prevent infinite loop
           ITERATION_COUNT=0
+          FILES_DELETED=0
           
           while true; do
             ITERATION_COUNT=$((ITERATION_COUNT + 1))
@@ -637,25 +674,45 @@ jobs:
             
             CURRENT_SIZE=$(du -sb videos 2>/dev/null | cut -f1 || echo "0")
             if [ "$CURRENT_SIZE" -le "$TARGET_SIZE" ]; then
+              echo "✓ Target size reached"
               break
             fi
             
             # Find and delete oldest video file
-            OLDEST=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) -printf '%T+ %p\n' 2>/dev/null | sort | head -1 | cut -d' ' -f2-)
-            if [ -z "$OLDEST" ]; then
+            OLDEST=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) -printf '%T+ %p\n' 2>/dev/null | sort | head -1 | cut -d' ' -f2- || echo "")
+            if [ -z "$OLDEST" ] || [ ! -f "$OLDEST" ]; then
               echo "⚠️  No more files to delete"
               break
             fi
             
-            echo "Deleting oldest file to free space: $(basename "$OLDEST")"
+            FILE_SIZE=$(stat -c%s "$OLDEST" 2>/dev/null || echo "0")
+            echo "Deleting oldest file: $(basename "$OLDEST") ($(numfmt --to=iec-i --suffix=B $FILE_SIZE 2>/dev/null || echo "${FILE_SIZE}B"))"
             rm -f "$OLDEST" "${OLDEST}.uploaded"
+            FILES_DELETED=$((FILES_DELETED + 1))
           done
           
           FINAL_SIZE=$(du -sb videos 2>/dev/null | cut -f1 || echo "0")
-          FINAL_GB=$(echo "scale=2; $FINAL_SIZE / 1024 / 1024 / 1024" | bc)
-          echo "Reduced artifact size to ${FINAL_GB}GB"
+          if command -v bc &> /dev/null; then
+            FINAL_GB=$(echo "scale=2; $FINAL_SIZE / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
+          else
+            FINAL_GB=$(awk "BEGIN {printf \"%.2f\", $FINAL_SIZE / 1024 / 1024 / 1024}")
+          fi
+          echo "Deleted $FILES_DELETED file(s), reduced artifact size to ${FINAL_GB}GB"
       
 
+      
+      - name: Upload raw recordings (after split)
+        if: always() && steps.check-size.outputs.needs_split == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-videos-${{ matrix.channel.username }}-${{ matrix.channel.site }}-${{ github.run_number }}-${{ strategy.job-index }}
+          path: |
+            videos/**/*.ts
+            videos/**/*.mp4
+            videos/**/*.uploaded
+          retention-days: 1
+          if-no-files-found: ignore
+          compression-level: 0
       
       - uses: actions/cache/save@v4
         if: always()
@@ -664,12 +721,12 @@ jobs:
             conf/
             database/
             videos/
-          key: videos-${{ matrix.channel.username }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: videos-${{ matrix.channel.username }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index }}
       
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: db-${{ matrix.channel.username }}-${{ matrix.channel.site }}-${{ github.run_number }}
+          name: db-${{ matrix.channel.username }}-${{ matrix.channel.site }}-${{ github.run_number }}-${{ strategy.job-index }}
           path: database/
           retention-days: 30
           if-no-files-found: ignore
@@ -699,10 +756,10 @@ jobs:
         continue-on-error: true
         with:
           path: videos/
-          key: videos-${{ matrix.channel.username }}-${{ github.run_id }}-never-match
+          key: videos-${{ matrix.channel.username }}-${{ github.run_id }}-restore-${{ github.run_attempt }}
           restore-keys: |
             videos-${{ matrix.channel.username }}-${{ github.run_id }}-
-            videos-${{ matrix.channel.username }}-resume-
+            videos-${{ matrix.channel.username }}-
       
       - name: Verify artifact structure
         run: |
@@ -742,6 +799,8 @@ jobs:
           JOB_START=$(date +%s)
           MAX_JOB_TIME=$((11 * 3600))  # 11 hours (leave 1 hour buffer before job timeout)
           ITERATION=0
+          CONSECUTIVE_EMPTY_ITERATIONS=0
+          MAX_EMPTY_ITERATIONS=10  # Stop after 10 consecutive empty iterations (20 minutes)
           
           # Continuous processing loop
           PROCESSED_COUNT=0
@@ -762,7 +821,7 @@ jobs:
             echo "=== Processing Iteration #$ITERATION ($(date)) ==="
             
             # Check available disk space
-            AVAILABLE_GB=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
+            AVAILABLE_GB=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//' || echo "0")
             echo "Available disk space: ${AVAILABLE_GB}GB"
             
             if [ "$AVAILABLE_GB" -lt 2 ]; then
@@ -800,10 +859,18 @@ jobs:
             else
               echo "Videos directory does not exist"
             fi
+            # Track consecutive empty iterations
+            CONSECUTIVE_EMPTY_ITERATIONS=$((CONSECUTIVE_EMPTY_ITERATIONS + 1))
+            if [ $CONSECUTIVE_EMPTY_ITERATIONS -ge $MAX_EMPTY_ITERATIONS ]; then
+              echo "No files found after $MAX_EMPTY_ITERATIONS iterations - stopping to save resources"
+              break
+            fi
             # Don't exit - continue loop to wait for files
             ITERATION_PROCESSED=0
             ITERATION_FAILED=0
           else
+            # Reset empty iteration counter when files are found
+            CONSECUTIVE_EMPTY_ITERATIONS=0
             
             FILE_COUNT=$(echo "$COMPLETED_FILES" | wc -l)
             echo "Found $FILE_COUNT completed file(s) to process (max $MAX_FILES per run)"
@@ -852,7 +919,7 @@ jobs:
               echo "=== Processing: $BASENAME ==="
               
               # Check disk space before processing
-              AVAILABLE_GB=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
+              AVAILABLE_GB=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//' || echo "0")
               if [ "$AVAILABLE_GB" -lt 1 ]; then
                 echo "⚠️  Skipping: Insufficient disk space (${AVAILABLE_GB}GB)"
                 continue
@@ -861,7 +928,11 @@ jobs:
               # For conversion, we need 2x the source file size
               # Check if we have enough space
               if [ -n "$VIDEO_SIZE_BYTES" ] && [ "$VIDEO_SIZE_BYTES" -gt 0 ]; then
-                REQUIRED_GB=$(echo "scale=0; ($VIDEO_SIZE_BYTES * 2) / 1024 / 1024 / 1024 + 1" | bc 2>/dev/null || echo "2")
+                if command -v bc &> /dev/null; then
+                  REQUIRED_GB=$(echo "scale=0; ($VIDEO_SIZE_BYTES * 2) / 1024 / 1024 / 1024 + 1" | bc 2>/dev/null || echo "2")
+                else
+                  REQUIRED_GB=$(awk "BEGIN {printf \"%.0f\", ($VIDEO_SIZE_BYTES * 2) / 1024 / 1024 / 1024 + 1}")
+                fi
               else
                 REQUIRED_GB=2
               fi
@@ -884,15 +955,21 @@ jobs:
                 
                 # Calculate timeout based on file size (30 min + 10 min per GB over 2GB)
                 if [ -n "$VIDEO_SIZE_BYTES" ] && [ "$VIDEO_SIZE_BYTES" -gt 0 ]; then
-                  FILE_SIZE_GB=$(echo "scale=2; $VIDEO_SIZE_BYTES / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "1")
+                  if command -v bc &> /dev/null; then
+                    FILE_SIZE_GB=$(echo "scale=2; $VIDEO_SIZE_BYTES / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "1")
+                  else
+                    FILE_SIZE_GB=$(awk "BEGIN {printf \"%.2f\", $VIDEO_SIZE_BYTES / 1024 / 1024 / 1024}")
+                  fi
                 else
                   FILE_SIZE_GB=1
                 fi
                 
                 CONVERT_TIMEOUT=30
                 
-                if (( $(echo "$FILE_SIZE_GB > 2" | bc -l) )); then
-                  EXTRA_TIME=$(echo "($FILE_SIZE_GB - 2) * 10" | bc | cut -d. -f1)
+                # Use awk for comparison to avoid bc dependency
+                NEEDS_EXTRA=$(awk "BEGIN {print ($FILE_SIZE_GB > 2) ? 1 : 0}")
+                if [ "$NEEDS_EXTRA" -eq 1 ]; then
+                  EXTRA_TIME=$(awk "BEGIN {printf \"%.0f\", ($FILE_SIZE_GB - 2) * 10}")
                   CONVERT_TIMEOUT=$((30 + EXTRA_TIME))
                   echo "Large file (${FILE_SIZE_GB}GB) - using ${CONVERT_TIMEOUT} minute timeout"
                 fi
@@ -933,11 +1010,21 @@ jobs:
                 continue
               fi
               
-              MP4_SIZE_GB=$(echo "scale=2; $MP4_SIZE_BYTES / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
+              if command -v bc &> /dev/null && [ "$MP4_SIZE_BYTES" -gt 0 ]; then
+                MP4_SIZE_GB=$(echo "scale=2; $MP4_SIZE_BYTES / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
+              else
+                MP4_SIZE_GB=$(awk "BEGIN {printf \"%.2f\", $MP4_SIZE_BYTES / 1024 / 1024 / 1024}")
+              fi
               
-              if (( $(echo "$MP4_SIZE_GB > 5" | bc -l) )); then
+              # Use awk for comparison
+              IS_LARGE=$(awk "BEGIN {print ($MP4_SIZE_GB > 5) ? 1 : 0}")
+              if [ "$IS_LARGE" -eq 1 ]; then
                 echo "⚠️  WARNING: Large file (${MP4_SIZE_GB}GB) - upload may be slow"
-                EST_MINUTES=$(echo "$MP4_SIZE_GB * 10" | bc 2>/dev/null || echo "60")
+                if command -v bc &> /dev/null; then
+                  EST_MINUTES=$(echo "$MP4_SIZE_GB * 10" | bc 2>/dev/null || echo "60")
+                else
+                  EST_MINUTES=$(awk "BEGIN {printf \"%.0f\", $MP4_SIZE_GB * 10}")
+                fi
                 echo "Estimated upload time: ~${EST_MINUTES} minutes at 10MB/s"
               fi
               
@@ -979,8 +1066,12 @@ jobs:
                 UPLOAD_ATTEMPTS=$((UPLOAD_ATTEMPTS + 1))
                 
                 if [ $UPLOAD_ATTEMPTS -gt 1 ]; then
-                  echo "Retry attempt $UPLOAD_ATTEMPTS of $MAX_UPLOAD_ATTEMPTS..."
-                  sleep 5
+                  # Exponential backoff with jitter
+                  BACKOFF=$((5 * (2 ** (UPLOAD_ATTEMPTS - 1))))
+                  JITTER=$((RANDOM % 5))
+                  WAIT_TIME=$((BACKOFF + JITTER))
+                  echo "Retry attempt $UPLOAD_ATTEMPTS of $MAX_UPLOAD_ATTEMPTS (waiting ${WAIT_TIME}s)..."
+                  sleep $WAIT_TIME
                 fi
                 
                 # Get best server with fallback
@@ -1018,7 +1109,7 @@ jobs:
                 UPLOAD_RESPONSE=$(timeout ${UPLOAD_TIMEOUT}m curl -X POST "https://${SERVER}.gofile.io/contents/uploadfile" \
                   -F "file=@$MP4_FILE" \
                   -w "\n%{http_code}" \
-                  -s 2>/dev/null || echo "timeout\n000")
+                  -s 2>/dev/null || printf 'timeout\n000')
                 
                 HTTP_CODE=$(echo "$UPLOAD_RESPONSE" | tail -1)
                 RESPONSE_BODY=$(echo "$UPLOAD_RESPONSE" | head -n -1)
@@ -1052,70 +1143,116 @@ jobs:
                       UPLOAD_SPEED="0"
                     fi
                     
-                    # Create/update database with file locking
+                    # Create/update database with file locking and retry logic
                     if [ ! -f database/uploads.json ]; then
                       mkdir -p database
                       echo '{"records":[]}' > database/uploads.json
                     fi
                     
-                    # Use flock for database operations to prevent race conditions
-                    (
-                      # Wait max 30 seconds for lock
-                      if flock -x -w 30 200; then
-                        RECORD=$(jq -n \
-                          --arg id "${{ matrix.channel.username }}_$(date +%s)_$$" \
-                          --arg username "${{ matrix.channel.username }}" \
-                          --arg site "${{ matrix.channel.site }}" \
-                          --arg filename "$(basename "$MP4_FILE")" \
-                          --arg link "$DOWNLOAD_LINK" \
-                          --arg uploaded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                          --arg filesize "$FILESIZE" \
-                          --arg upload_duration "$UPLOAD_DURATION" \
-                          --arg upload_speed "$UPLOAD_SPEED" \
-                          --arg convert_duration "$CONVERT_DURATION" \
-                          '{
-                            id: $id,
-                            username: $username,
-                            site: $site,
-                            filename: $filename,
-                            gofile_link: $link,
-                            uploaded_at: $uploaded_at,
-                            filesize_bytes: ($filesize | tonumber),
-                            upload_duration: ($upload_duration | tonumber),
-                            upload_speed: ($upload_speed | tonumber),
-                            convert_duration: ($convert_duration | tonumber),
-                            status: "uploaded"
-                          }')
-                        
-                        if timeout 30s jq ".records += [$RECORD]" database/uploads.json > database/uploads.json.tmp 2>/dev/null; then
-                          mv database/uploads.json.tmp database/uploads.json
-                          echo "✓ Database updated"
+                    # Use flock for database operations with retry logic
+                    DB_UPDATE_SUCCESS=false
+                    DB_RETRY=0
+                    MAX_DB_RETRIES=5
+                    
+                    while [ $DB_RETRY -lt $MAX_DB_RETRIES ] && [ "$DB_UPDATE_SUCCESS" = "false" ]; do
+                      DB_RETRY=$((DB_RETRY + 1))
+                      echo "Database update attempt $DB_RETRY/$MAX_DB_RETRIES..."
+                      
+                      (
+                        # Wait max 60 seconds for lock with exponential backoff
+                        LOCK_TIMEOUT=$((30 + DB_RETRY * 10))
+                        if flock -x -w $LOCK_TIMEOUT 200; then
+                          # Create backup before modifying
+                          cp database/uploads.json database/uploads.json.bak 2>/dev/null || true
+                          
+                          RECORD=$(jq -n \
+                            --arg id "${{ matrix.channel.username }}_$(date +%s)_$$" \
+                            --arg username "${{ matrix.channel.username }}" \
+                            --arg site "${{ matrix.channel.site }}" \
+                            --arg filename "$(basename "$MP4_FILE")" \
+                            --arg link "$DOWNLOAD_LINK" \
+                            --arg uploaded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                            --arg filesize "$FILESIZE" \
+                            --arg upload_duration "$UPLOAD_DURATION" \
+                            --arg upload_speed "$UPLOAD_SPEED" \
+                            --arg convert_duration "$CONVERT_DURATION" \
+                            '{
+                              id: $id,
+                              username: $username,
+                              site: $site,
+                              filename: $filename,
+                              gofile_link: $link,
+                              uploaded_at: $uploaded_at,
+                              filesize_bytes: ($filesize | tonumber),
+                              upload_duration: ($upload_duration | tonumber),
+                              upload_speed: ($upload_speed | tonumber),
+                              convert_duration: ($convert_duration | tonumber),
+                              status: "uploaded"
+                            }')
+                          
+                          if timeout 60s jq ".records += [$RECORD]" database/uploads.json > database/uploads.json.tmp 2>/dev/null; then
+                            mv database/uploads.json.tmp database/uploads.json
+                            rm -f database/uploads.json.bak
+                            echo "success" > /tmp/db_update_status_$$
+                          else
+                            # Restore backup if available
+                            if [ -f database/uploads.json.bak ]; then
+                              mv database/uploads.json.bak database/uploads.json
+                            fi
+                            rm -f database/uploads.json.tmp
+                            echo "failed" > /tmp/db_update_status_$$
+                          fi
                         else
-                          echo "✗ Database operation timed out or failed"
-                          rm -f database/uploads.json.tmp
+                          echo "failed" > /tmp/db_update_status_$$
                         fi
-                      else
-                        echo "✗ Failed to acquire database lock after 30 seconds"
+                      ) 200>database/.lock
+                      
+                      # Check result and retry if needed
+                      if [ -f /tmp/db_update_status_$$ ]; then
+                        STATUS=$(cat /tmp/db_update_status_$$)
+                        rm -f /tmp/db_update_status_$$
+                        
+                        if [ "$STATUS" = "success" ]; then
+                          DB_UPDATE_SUCCESS=true
+                          echo "✓ Database updated successfully"
+                        else
+                          echo "✗ Database update failed (attempt $DB_RETRY/$MAX_DB_RETRIES)"
+                          if [ $DB_RETRY -lt $MAX_DB_RETRIES ]; then
+                            BACKOFF=$((2 ** DB_RETRY))
+                            echo "Retrying in ${BACKOFF}s..."
+                            sleep $BACKOFF
+                          fi
+                        fi
                       fi
-                    ) 200>database/.lock
+                    done
                     
-                    # Step 3: Delete local files
-                    echo "Deleting local files..."
-                    rm -f "$VIDEO_FILE" "$MP4_FILE" "$MARKER"
-                    echo "✓ Local files deleted"
-                    
-                    ITERATION_PROCESSED=$((ITERATION_PROCESSED + 1))
-                    PROCESSED_COUNT=$((PROCESSED_COUNT + 1))
+                    # Only delete files if database update succeeded
+                    if [ "$DB_UPDATE_SUCCESS" = "true" ]; then
+                      # Step 3: Delete local files
+                      echo "Deleting local files..."
+                      rm -f "$VIDEO_FILE" "$MP4_FILE" "$MARKER"
+                      echo "✓ Local files deleted"
+                      
+                      ITERATION_PROCESSED=$((ITERATION_PROCESSED + 1))
+                      PROCESSED_COUNT=$((PROCESSED_COUNT + 1))
+                    else
+                      echo "⚠️ WARNING: Upload succeeded but database update failed after $MAX_DB_RETRIES attempts!"
+                      echo "⚠️ Files preserved: $VIDEO_FILE, $MP4_FILE"
+                      echo "⚠️ Manual intervention may be required"
+                      # Don't delete files or increment counters
+                    fi
                   else
                     echo "✗ Upload failed: Invalid response"
                     echo "Response: $RESPONSE_BODY"
                   fi
                 elif [ "$HTTP_CODE" = "429" ]; then
                   echo "✗ Rate limited by GoFile API"
-                  # Exponential backoff for rate limits
-                  BACKOFF=$((5 * UPLOAD_ATTEMPTS))
-                  echo "Waiting ${BACKOFF} seconds before retry..."
-                  sleep $BACKOFF
+                  # Exponential backoff with jitter for rate limits
+                  BACKOFF=$((10 * (2 ** (UPLOAD_ATTEMPTS - 1))))
+                  JITTER=$((RANDOM % 10))
+                  WAIT_TIME=$((BACKOFF + JITTER))
+                  echo "Waiting ${WAIT_TIME} seconds before retry..."
+                  sleep $WAIT_TIME
                 elif [ "$HTTP_CODE" = "000" ]; then
                   echo "✗ Upload timeout or network error"
                 else
@@ -1147,7 +1284,11 @@ jobs:
               # Calculate total uploaded size
               TOTAL_SIZE=$(jq '[.records[].filesize_bytes] | add // 0' database/uploads.json 2>/dev/null || echo "0")
               if [ "$TOTAL_SIZE" != "0" ] && [ "$TOTAL_SIZE" -gt 0 ]; then
-                TOTAL_SIZE_GB=$(echo "scale=2; $TOTAL_SIZE / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
+                if command -v bc &> /dev/null; then
+                  TOTAL_SIZE_GB=$(echo "scale=2; $TOTAL_SIZE / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
+                else
+                  TOTAL_SIZE_GB=$(awk "BEGIN {printf \"%.2f\", $TOTAL_SIZE / 1024 / 1024 / 1024}")
+                fi
                 echo "Total uploaded: ${TOTAL_SIZE_GB}GB"
               fi
               
@@ -1195,31 +1336,63 @@ jobs:
         if: always()
         with:
           path: database/
-          key: state-${{ matrix.channel.username }}-${{ github.run_id }}-processed
+          key: state-${{ matrix.channel.username }}-${{ github.run_id }}-${{ github.run_attempt }}-processed-${{ strategy.job-index }}
       
       - name: Upload database artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: processed-db-${{ matrix.channel.username }}-${{ github.run_number }}
+          name: processed-db-${{ matrix.channel.username }}-${{ matrix.channel.site }}-${{ github.run_number }}-${{ strategy.job-index }}
           path: database/
           retention-days: 30
           if-no-files-found: ignore
 
   # Auto-restart for 24/7 - only restarts after BOTH jobs complete
   restart:
-    if: "!startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true'"
+    if: "always() && !cancelled() && !startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true'"
     needs: [setup, record, process]
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
     steps:
-      - name: Wait before restart
+      - name: Check job results
+        id: check-results
         run: |
-          # Random delay between 30-60 seconds to avoid thundering herd
-          DELAY=$((30 + RANDOM % 31))
+          RECORD_RESULT="${{ needs.record.result }}"
+          PROCESS_RESULT="${{ needs.process.result }}"
+          
+          echo "Record job result: $RECORD_RESULT"
+          echo "Process job result: $PROCESS_RESULT"
+          
+          # Count failures
+          FAILURE_COUNT=0
+          if [ "$RECORD_RESULT" = "failure" ]; then
+            FAILURE_COUNT=$((FAILURE_COUNT + 1))
+          fi
+          if [ "$PROCESS_RESULT" = "failure" ]; then
+            FAILURE_COUNT=$((FAILURE_COUNT + 1))
+          fi
+          
+          echo "failure_count=$FAILURE_COUNT" >> $GITHUB_OUTPUT
+          
+          # Don't restart if both jobs failed (likely a systemic issue)
+          if [ $FAILURE_COUNT -ge 2 ]; then
+            echo "should_restart=false" >> $GITHUB_OUTPUT
+            echo "⚠️  Both jobs failed - skipping restart to prevent failure loop"
+          else
+            echo "should_restart=true" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Wait before restart
+        if: steps.check-results.outputs.should_restart == 'true'
+        run: |
+          # Random delay between 30-90 seconds to avoid thundering herd
+          DELAY=$((30 + RANDOM % 61))
           echo "Waiting ${DELAY} seconds before restart..."
           sleep $DELAY
       
       - uses: actions/github-script@v7
+        if: steps.check-results.outputs.should_restart == 'true'
         continue-on-error: true
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -1228,12 +1401,32 @@ jobs:
             const maxRetries = 3;
             let lastError;
             
-            // Determine the correct branch
+            // Determine the correct branch with fallback
             let branch = 'main';
+            
+            // Try multiple sources for branch name
             if (context.ref && context.ref.startsWith('refs/heads/')) {
               branch = context.ref.replace('refs/heads/', '');
+              console.log(`Using branch from context.ref: ${branch}`);
             } else if (context.payload && context.payload.ref) {
-              branch = context.payload.ref;
+              if (context.payload.ref.startsWith('refs/heads/')) {
+                branch = context.payload.ref.replace('refs/heads/', '');
+              } else {
+                branch = context.payload.ref;
+              }
+              console.log(`Using branch from payload.ref: ${branch}`);
+            } else {
+              // Fallback: get default branch from repo
+              try {
+                const repo = await github.rest.repos.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo
+                });
+                branch = repo.data.default_branch;
+                console.log(`Using default branch from repo: ${branch}`);
+              } catch (error) {
+                console.log(`Failed to get default branch, using 'main': ${error.message}`);
+              }
             }
             
             console.log(`Attempting to restart workflow on branch: ${branch}`);
@@ -1246,16 +1439,28 @@ jobs:
                   workflow_id: 'release.yml',
                   ref: branch
                 });
-                console.log('Successfully triggered restart');
+                console.log('✓ Successfully triggered restart');
                 return;
               } catch (error) {
                 lastError = error;
-                console.log(`Attempt ${i + 1} failed: ${error.message}`);
-                if (i < maxRetries - 1) {
-                  await new Promise(resolve => setTimeout(resolve, 5000));
+                console.log(`Attempt ${i + 1}/${maxRetries} failed: ${error.message}`);
+                
+                // Check if it's a rate limit error
+                if (error.status === 403 && error.message.includes('rate limit')) {
+                  console.log('Rate limited - waiting longer before retry');
+                  if (i < maxRetries - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 30000)); // 30s wait
+                  }
+                } else if (i < maxRetries - 1) {
+                  // Exponential backoff with jitter
+                  const backoff = 5000 * Math.pow(2, i) + Math.random() * 2000;
+                  await new Promise(resolve => setTimeout(resolve, backoff));
                 }
               }
             }
             
-            console.log('All restart attempts failed:', lastError.message);
+            console.log('❌ All restart attempts failed:', lastError.message);
             console.log('Workflow will resume on next scheduled run');
+            
+            // Don't throw error - let it fail gracefully
+            core.warning('Failed to trigger restart after all retries');

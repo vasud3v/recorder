@@ -894,26 +894,26 @@ jobs:
                   continue
                 fi
               fi
-            
-            # Verify MP4 was created successfully
-            if [ ! -f "$MP4_FILE" ]; then
-              echo "✗ MP4 file not created"
-              ITERATION_FAILED=$((ITERATION_FAILED + 1))
-              FAILED_COUNT=$((FAILED_COUNT + 1))
-              rm -f "$MARKER"
-              continue
-            fi
-            
-            # Check MP4 file size before upload
-            MP4_SIZE_BYTES=$(stat -c%s "$MP4_FILE" 2>/dev/null || echo "0")
-            
-            if [ "$MP4_SIZE_BYTES" -lt 10240 ]; then
-              echo "✗ MP4 file is too small or corrupted (${MP4_SIZE_BYTES} bytes, need >10KB)"
-              rm -f "$MP4_FILE" "$MARKER"
-              ITERATION_FAILED=$((ITERATION_FAILED + 1))
-              FAILED_COUNT=$((FAILED_COUNT + 1))
-              continue
-            fi
+              
+              # Verify MP4 was created successfully
+              if [ ! -f "$MP4_FILE" ]; then
+                echo "✗ MP4 file not created"
+                ITERATION_FAILED=$((ITERATION_FAILED + 1))
+                FAILED_COUNT=$((FAILED_COUNT + 1))
+                rm -f "$MARKER"
+                continue
+              fi
+              
+              # Check MP4 file size before upload
+              MP4_SIZE_BYTES=$(stat -c%s "$MP4_FILE" 2>/dev/null || echo "0")
+              
+              if [ "$MP4_SIZE_BYTES" -lt 10240 ]; then
+                echo "✗ MP4 file is too small or corrupted (${MP4_SIZE_BYTES} bytes, need >10KB)"
+                rm -f "$MP4_FILE" "$MARKER"
+                ITERATION_FAILED=$((ITERATION_FAILED + 1))
+                FAILED_COUNT=$((FAILED_COUNT + 1))
+                continue
+              fi
               
               MP4_SIZE_GB=$(echo "scale=2; $MP4_SIZE_BYTES / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
               

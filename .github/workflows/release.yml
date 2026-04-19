@@ -3,6 +3,11 @@ name: GoondVR
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# Prevent multiple workflows from running simultaneously
+concurrency:
+  group: goondvr-recording
+  cancel-in-progress: false  # Don't cancel running workflows, just queue new ones
+
 on:
   push:
     tags:
@@ -165,7 +170,7 @@ jobs:
     if: "!startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true'"
     needs: setup
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 390  # 6.5 hours - allows monitor to complete (6h) + buffer
     strategy:
       matrix:
         channel: ${{ fromJson(needs.setup.outputs.channels) }}
@@ -220,9 +225,9 @@ jobs:
             sleep 2
           done
           
-          # Test FlareSolverr
+          # Test FlareSolverr with appropriate timeout
           echo "Testing FlareSolverr..."
-          curl -s --max-time 30 -X POST http://localhost:8191/v1 \
+          curl -s --max-time 90 -X POST http://localhost:8191/v1 \
             -H "Content-Type: application/json" \
             -d '{"cmd":"request.get","url":"https://chaturbate.com","maxTimeout":60000}' | jq . || {
               echo "⚠️  FlareSolverr test failed or timed out"
@@ -304,7 +309,7 @@ jobs:
             OFFLINE_COUNT=0
             MAX_OFFLINE_CHECKS=3  # Stop after 3 consecutive offline checks post-recording
             START_TIME=$(date +%s)
-            MAX_MONITOR_TIME=$((6 * 3600))  # 6 hours absolute maximum
+            MAX_MONITOR_TIME=$((5 * 3600))  # 5 hours (less than job timeout of 6.5h)
             
             while true; do
               # Check if monitor has been running too long
@@ -312,7 +317,7 @@ jobs:
               ELAPSED=$((CURRENT_TIME - START_TIME))
               
               if [ $ELAPSED -gt $MAX_MONITOR_TIME ]; then
-                echo "⏱️  Monitor timeout reached (6 hours) - stopping"
+                echo "⏱️  Monitor timeout reached (5 hours) - stopping"
                 pkill -f goondvr || true
                 break
               fi
@@ -414,12 +419,17 @@ jobs:
             TOTAL_ATTEMPTS=0
             MAX_INITIAL_ATTEMPTS=30  # Max attempts before first recording (30 * interval = 30 minutes with interval=1)
             
+            # Calculate timeout based on max_duration (add 5 minutes buffer)
+            RECORDING_TIMEOUT=$((MAX_DURATION + 5))
+            echo "Recording timeout set to ${RECORDING_TIMEOUT} minutes (max_duration + 5 min buffer)"
+            
             while true; do
               echo "Starting recording attempt..."
               TOTAL_ATTEMPTS=$((TOTAL_ATTEMPTS + 1))
               
               # Record without conversion/upload - just save video files
-              timeout 30m ./goondvr \
+              # Timeout is max_duration + 5 minutes to allow for chunk completion
+              timeout ${RECORDING_TIMEOUT}m ./goondvr \
                 -u "${{ matrix.channel.username }}" \
                 --site "${{ matrix.channel.site }}" \
                 -resolution "$RESOLUTION" \
@@ -431,6 +441,16 @@ jobs:
               
               EXIT_CODE=$?
               echo "Recording exited with code $EXIT_CODE"
+              
+              # Explain exit code
+              if [ $EXIT_CODE -eq 124 ]; then
+                echo "⏱️  Recording timeout reached (${RECORDING_TIMEOUT} minutes)"
+                echo "This is normal - checking if stream is still active..."
+              elif [ $EXIT_CODE -eq 0 ]; then
+                echo "✓ Recording completed normally"
+              else
+                echo "Recording exited with code $EXIT_CODE"
+              fi
               
               # Check if we have any video files
               VIDEO_COUNT=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l || echo "0")
@@ -461,7 +481,7 @@ jobs:
               
               # If timeout (124), continue recording
               if [ $EXIT_CODE -eq 124 ]; then
-                echo "⏱️  30-minute check timeout - continuing..."
+                echo "⏱️  ${RECORDING_TIMEOUT}-minute check timeout - continuing..."
                 CONSECUTIVE_OFFLINE=0  # Reset since we're actively recording
                 continue
               fi
@@ -617,11 +637,12 @@ jobs:
           compression-level: 9
 
   # Dedicated job for processing: convert, upload, delete
+  # Runs independently - doesn't wait for record job to complete
   process:
-    if: "!startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true' && always()"
-    needs: [setup, record]
+    if: "!startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true'"
+    needs: [setup]
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 720  # 12 hours - allows processing of up to 50 large files
     strategy:
       matrix:
         channel: ${{ fromJson(needs.setup.outputs.channels) }}
@@ -674,19 +695,48 @@ jobs:
           mkdir -p database/backups processed
           
           echo "=== Processing Job Started ==="
+          echo "This job will run continuously for up to 12 hours, processing files as they become available"
           
-          # Check available disk space
-          AVAILABLE_GB=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
-          echo "Available disk space: ${AVAILABLE_GB}GB"
+          # Track start time for timeout
+          JOB_START=$(date +%s)
+          MAX_JOB_TIME=$((11 * 3600))  # 11 hours (leave 1 hour buffer before job timeout)
+          ITERATION=0
           
-          if [ "$AVAILABLE_GB" -lt 2 ]; then
-            echo "⚠️  WARNING: Low disk space for processing (${AVAILABLE_GB}GB)"
-          fi
-          
-          echo "Looking for completed video files to process..."
-          
-          # Find all video files that have .uploaded marker (limit to 50 per run for safety)
-          COMPLETED_FILES=$(find videos -type f -name "*.uploaded" 2>/dev/null | sort | head -50 || true)
+          # Continuous processing loop
+          while true; do
+            ITERATION=$((ITERATION + 1))
+            CURRENT_TIME=$(date +%s)
+            ELAPSED=$((CURRENT_TIME - JOB_START))
+            
+            # Check if we're approaching job timeout
+            if [ $ELAPSED -gt $MAX_JOB_TIME ]; then
+              echo "⏱️  Job time limit approaching (11 hours) - stopping gracefully"
+              break
+            fi
+            
+            echo ""
+            echo "=== Processing Iteration #$ITERATION ($(date)) ==="
+            
+            # Check available disk space
+            AVAILABLE_GB=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
+            echo "Available disk space: ${AVAILABLE_GB}GB"
+            
+            if [ "$AVAILABLE_GB" -lt 2 ]; then
+              echo "⚠️  WARNING: Low disk space for processing (${AVAILABLE_GB}GB)"
+            fi
+            
+            echo "Looking for completed video files to process..."
+            
+            # Find all video files that have .uploaded marker (limit based on max_duration)
+            # Fewer files for large chunks to stay within timeout
+            MAX_FILES=50
+            MAX_DURATION="${{ inputs.max_duration || '45' }}"
+            if [ "$MAX_DURATION" -gt 120 ]; then
+              MAX_FILES=25
+              echo "Large chunk size detected - limiting to 25 files per run"
+            fi
+            
+            COMPLETED_FILES=$(find videos -type f -name "*.uploaded" 2>/dev/null | sort | head -$MAX_FILES || true)
           
           if [ -z "$COMPLETED_FILES" ]; then
             echo "No completed files found to process"
@@ -710,7 +760,7 @@ jobs:
           fi
           
           FILE_COUNT=$(echo "$COMPLETED_FILES" | wc -l)
-          echo "Found $FILE_COUNT completed file(s) to process (max 50 per run)"
+          echo "Found $FILE_COUNT completed file(s) to process (max $MAX_FILES per run)"
           
           # Check if jq is available
           if ! command -v jq &> /dev/null; then
@@ -765,8 +815,19 @@ jobs:
               CONVERT_DURATION=0
             else
               echo "Converting to MP4..."
+              
+              # Calculate timeout based on file size (30 min + 10 min per GB over 2GB)
+              FILE_SIZE_GB=$(echo "scale=2; $VIDEO_SIZE_BYTES / 1024 / 1024 / 1024" | bc)
+              CONVERT_TIMEOUT=30
+              
+              if (( $(echo "$FILE_SIZE_GB > 2" | bc -l) )); then
+                EXTRA_TIME=$(echo "($FILE_SIZE_GB - 2) * 10" | bc | cut -d. -f1)
+                CONVERT_TIMEOUT=$((30 + EXTRA_TIME))
+                echo "Large file (${FILE_SIZE_GB}GB) - using ${CONVERT_TIMEOUT} minute timeout"
+              fi
+              
               CONVERT_START=$(date +%s)
-              if timeout 30m ffmpeg -nostdin -y -i "$VIDEO_FILE" -c copy -movflags +faststart "$MP4_FILE" 2>&1 | tail -20; then
+              if timeout ${CONVERT_TIMEOUT}m ffmpeg -nostdin -y -i "$VIDEO_FILE" -c copy -movflags +faststart "$MP4_FILE" 2>&1 | tail -20; then
                 CONVERT_END=$(date +%s)
                 CONVERT_DURATION=$((CONVERT_END - CONVERT_START))
                 MP4_SIZE=$(du -h "$MP4_FILE" | cut -f1)
@@ -836,10 +897,24 @@ jobs:
                   echo "Using server: $SERVER"
                 fi
                 
+                # Calculate upload timeout based on file size (assume 2MB/s minimum)
+                FILE_SIZE_MB=$(echo "scale=0; $MP4_SIZE_BYTES / 1024 / 1024" | bc)
+                UPLOAD_TIMEOUT=$((FILE_SIZE_MB / 2 / 60 + 10))  # Size/2MB/s/60s + 10min buffer
+                
+                # Minimum 60 minutes, maximum 180 minutes
+                if [ $UPLOAD_TIMEOUT -lt 60 ]; then
+                  UPLOAD_TIMEOUT=60
+                elif [ $UPLOAD_TIMEOUT -gt 180 ]; then
+                  UPLOAD_TIMEOUT=180
+                  echo "⚠️  Very large file - upload may take up to 3 hours"
+                fi
+                
+                echo "Upload timeout: ${UPLOAD_TIMEOUT} minutes"
+                
                 UPLOAD_START=$(date +%s)
                 
-                # Upload to selected server with timeout (max 60 minutes)
-                UPLOAD_RESPONSE=$(timeout 60m curl -X POST "https://${SERVER}.gofile.io/contents/uploadfile" \
+                # Upload to selected server with dynamic timeout
+                UPLOAD_RESPONSE=$(timeout ${UPLOAD_TIMEOUT}m curl -X POST "https://${SERVER}.gofile.io/contents/uploadfile" \
                   -F "file=@$MP4_FILE" \
                   -w "\n%{http_code}" \
                   -s 2>/dev/null || echo "timeout\n000")
@@ -911,11 +986,11 @@ jobs:
                             status: "uploaded"
                           }')
                         
-                        if jq ".records += [$RECORD]" database/uploads.json > database/uploads.json.tmp 2>/dev/null; then
+                        if timeout 30s jq ".records += [$RECORD]" database/uploads.json > database/uploads.json.tmp 2>/dev/null; then
                           mv database/uploads.json.tmp database/uploads.json
                           echo "✓ Database updated"
                         else
-                          echo "✗ Failed to update database"
+                          echo "✗ Database operation timed out or failed"
                           rm -f database/uploads.json.tmp
                         fi
                       else
@@ -991,6 +1066,22 @@ jobs:
           fi
           
           echo "============================"
+          
+          # If no files were processed, wait before next iteration
+          if [ "$PROCESSED_COUNT" -eq 0 ]; then
+            echo "No files processed this iteration - waiting 2 minutes before next check..."
+            sleep 120
+          else
+            echo "Processed $PROCESSED_COUNT file(s) - checking for more immediately..."
+            sleep 5
+          fi
+          
+          done  # End of continuous processing loop
+          
+          echo ""
+          echo "=== Processing Job Completed ==="
+          echo "Total iterations: $ITERATION"
+          echo "Job ran for $(($ELAPSED / 3600)) hours $(($ELAPSED % 3600 / 60)) minutes"
       
       - name: Save database
         uses: actions/cache/save@v4
@@ -1008,9 +1099,9 @@ jobs:
           retention-days: 30
           if-no-files-found: ignore
 
-  # Auto-restart for 24/7
+  # Auto-restart for 24/7 - only restarts after BOTH jobs complete
   restart:
-    if: "!startsWith(github.ref, 'refs/tags/') && (success() || failure()) && needs.setup.outputs.has-channels == 'true'"
+    if: "!startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true'"
     needs: [setup, record, process]
     runs-on: ubuntu-latest
     steps:

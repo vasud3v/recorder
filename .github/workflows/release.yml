@@ -71,6 +71,11 @@ on:
         required: false
         default: false
         type: boolean
+      enable_gofile_upload:
+        description: 'Upload immediately after recording (parallel, faster)'
+        required: false
+        default: true
+        type: boolean
 
 # =============================================================================
 jobs:
@@ -542,17 +547,17 @@ jobs:
       # Upload to GoFile immediately after recording instead of waiting
       # for all channels to finish
       - name: Setup Python for immediate upload
-        if: steps.record.outputs.has-files == 'true' && inputs.enable_gofile_upload
+        if: steps.record.outputs.has-files == 'true' && (inputs.enable_gofile_upload == true || inputs.enable_gofile_upload == null)
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies for immediate upload
-        if: steps.record.outputs.has-files == 'true' && inputs.enable_gofile_upload
+        if: steps.record.outputs.has-files == 'true' && (inputs.enable_gofile_upload == true || inputs.enable_gofile_upload == null)
         run: pip install requests tqdm
 
       - name: Convert and upload immediately
-        if: steps.record.outputs.has-files == 'true' && inputs.enable_gofile_upload
+        if: steps.record.outputs.has-files == 'true' && (inputs.enable_gofile_upload == true || inputs.enable_gofile_upload == null)
         env:
           GOFILE_TOKEN: ${{ secrets.GOFILE_TOKEN }}
         run: |
@@ -598,7 +603,7 @@ jobs:
   # Only runs if immediate upload is disabled
   # ---------------------------------------------------------------------------
   process:
-    if: "always() && !cancelled() && !startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true' && !inputs.enable_gofile_upload"
+    if: "always() && !cancelled() && !startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true' && inputs.enable_gofile_upload == false"
     needs: [setup, record]
     runs-on: ubuntu-latest
     timeout-minutes: 180  # 3 hours

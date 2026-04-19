@@ -516,11 +516,14 @@ jobs:
       - name: Process and upload to GoFile
         if: steps.download.outcome == 'success'
         run: |
+          # Get current date for database organization
+          CURRENT_DATE=$(date -u +%Y-%m-%d)
           STREAMER_DB="database/${{ matrix.channel.username }}"
-          mkdir -p "$STREAMER_DB" processed
+          STREAMER_DATE_DB="$STREAMER_DB/$CURRENT_DATE"
+          mkdir -p "$STREAMER_DATE_DB" processed
 
           # Initialize organized database structure using Python script
-          python3 scripts/database_manager.py init "${{ matrix.channel.username }}" "${{ matrix.channel.site }}" "${{ inputs.resolution || 1080 }}" "${{ inputs.framerate || 30 }}"
+          python3 scripts/database_manager.py init "${{ matrix.channel.username }}" "${{ matrix.channel.site }}"
 
           # Find all video files (skip anything < 1KB)
           VIDEO_COUNT=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) -size +1k 2>/dev/null | wc -l)
@@ -715,9 +718,34 @@ jobs:
             if jq ".records += [$RECORD]" "$STREAMER_DB/uploads.json" > "$STREAMER_DB/uploads.json.tmp" 2>/dev/null; then
               mv "$STREAMER_DB/uploads.json.tmp" "$STREAMER_DB/uploads.json"
               DB_OK=true
-              echo "  ✓ Database updated"
+              echo "  ✓ Database updated (legacy format)"
             else
               echo "  ⚠️  Database update failed — keeping files"
+            fi
+            
+            # Also save to new date-based structure
+            RECORDINGS_FILE="$STREAMER_DATE_DB/recordings.json"
+            if [ ! -f "$RECORDINGS_FILE" ]; then
+              echo "{\"date\":\"$CURRENT_DATE\",\"username\":\"${{ matrix.channel.username }}\",\"recordings\":[],\"summary\":{\"total_recordings\":0,\"total_size_bytes\":0,\"total_size_mb\":0.0,\"total_duration_seconds\":0,\"total_duration_minutes\":0.0,\"first_recording_time\":null,\"last_recording_time\":null}}" > "$RECORDINGS_FILE"
+            fi
+            
+            if jq ".recordings += [$RECORD]" "$RECORDINGS_FILE" > "$RECORDINGS_FILE.tmp" 2>/dev/null; then
+              mv "$RECORDINGS_FILE.tmp" "$RECORDINGS_FILE"
+              
+              # Update date summary
+              jq '
+                .summary.total_recordings = (.recordings | length) |
+                .summary.total_size_bytes = ([.recordings[].filesize_bytes] | add // 0) |
+                .summary.total_size_mb = ((.summary.total_size_bytes / 1048576) * 100 | round / 100) |
+                .summary.total_duration_seconds = ([.recordings[].duration_seconds] | add // 0) |
+                .summary.total_duration_minutes = ((.summary.total_duration_seconds / 60) * 100 | round / 100) |
+                .summary.first_recording_time = (.recordings[0].uploaded_at) |
+                .summary.last_recording_time = (.recordings[-1].uploaded_at)
+              ' "$RECORDINGS_FILE" > "$RECORDINGS_FILE.tmp"
+              mv "$RECORDINGS_FILE.tmp" "$RECORDINGS_FILE"
+              
+              DB_OK=true
+              echo "  ✓ Database updated (date-based: $CURRENT_DATE)"
             fi
 
             # ── Step 4: Cleanup ────────────────────────────────────
@@ -742,9 +770,24 @@ jobs:
           echo "╠══════════════════════════════════════════════════════╣"
           echo "║  Processed: $PROCESSED  |  Failed: $FAILED"
 
-          if [ -f "$STREAMER_DB/uploads.json" ]; then
-            TOTAL=$(jq '.records | length' "$STREAMER_DB/uploads.json" 2>/dev/null || echo "0")
-            TOTAL_BYTES=$(jq '[.records[].filesize_bytes] | add // 0' "$STREAMER_DB/uploads.json" 2>/dev/null || echo "0")
+          # Show today's recordings
+          if [ -f "$STREAMER_DATE_DB/recordings.json" ]; then
+            TODAY_COUNT=$(jq '.summary.total_recordings' "$STREAMER_DATE_DB/recordings.json" 2>/dev/null || echo "0")
+            TODAY_SIZE=$(jq '.summary.total_size_mb' "$STREAMER_DATE_DB/recordings.json" 2>/dev/null || echo "0")
+            TODAY_DURATION=$(jq '.summary.total_duration_minutes' "$STREAMER_DATE_DB/recordings.json" 2>/dev/null || echo "0")
+            echo "║  Today ($CURRENT_DATE): $TODAY_COUNT recordings, ${TODAY_SIZE}MB, ${TODAY_DURATION}min"
+          fi
+          
+          # Show overall stats
+          if [ -f "$STREAMER_DB/stats.json" ]; then
+            TOTAL=$(jq '.statistics.total_recordings' "$STREAMER_DB/stats.json" 2>/dev/null || echo "0")
+            TOTAL_GB=$(jq '.statistics.total_size_gb' "$STREAMER_DB/stats.json" 2>/dev/null || echo "0")
+            TOTAL_DAYS=$(jq '.statistics.total_days_recorded' "$STREAMER_DB/stats.json" 2>/dev/null || echo "0")
+            echo "║  Total: $TOTAL recordings across $TOTAL_DAYS days (${TOTAL_GB}GB)"
+            echo "╠══════════════════════════════════════════════════════╣"
+            echo "║  Recent uploads:"
+            jq -r '.recordings[-5:] | .[] | "║    \(.filename) → \(.gofile_link)"' "$STREAMER_DATE_DB/recordings.json" 2>/dev/null || echo "║    (none)"
+          fi
             TOTAL_GB=$(awk "BEGIN {printf \"%.2f\", $TOTAL_BYTES / 1073741824}")
             echo "║  Total DB records: $TOTAL  |  Total uploaded: ${TOTAL_GB}GB"
             echo "╠══════════════════════════════════════════════════════╣"

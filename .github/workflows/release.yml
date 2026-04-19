@@ -241,7 +241,7 @@ jobs:
         run: |
           echo "Waiting for FlareSolverr..."
           for i in $(seq 1 40); do
-            if curl -sf --max-time 5 http://127.0.0.1:8191/v1 > /dev/null 2>&1; then
+            if curl -s --max-time 5 http://127.0.0.1:8191/ > /dev/null 2>&1; then
               echo "✓ FlareSolverr ready"
               exit 0
             fi

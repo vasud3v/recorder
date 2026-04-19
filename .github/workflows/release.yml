@@ -331,7 +331,7 @@ jobs:
           RECORDED=false
           OFFLINE_COUNT=0
           ATTEMPT=0
-          REC_TIMEOUT=$((MAX_DURATION + 5))
+          REC_TIMEOUT=$MAX_DURATION
 
           # Thresholds depend on chunk duration
           if [ "$MAX_DURATION" -le 5 ]; then
@@ -357,7 +357,7 @@ jobs:
               --resolution "$RESOLUTION" \
               --framerate "$FRAMERATE" \
               --interval "$INTERVAL" \
-              --max-duration "$MAX_DURATION" \
+              --max-duration 0 \
               --max-filesize 0 \
               --completed-dir videos/completed \
               --finalize-mode none \
@@ -385,6 +385,10 @@ jobs:
 
             # goondvr exited on its own — stream likely offline
             if [ "$RECORDED" = "true" ]; then
+              if [ "${{ inputs.run_once }}" = "true" ]; then
+                echo "🛑 Run Once enabled - finished recording (stream disconnected/ended) — stopping"
+                break
+              fi
               OFFLINE_COUNT=$((OFFLINE_COUNT + 1))
               echo "Stream offline check $OFFLINE_COUNT/$MAX_OFFLINE"
               if [ "$OFFLINE_COUNT" -ge "$MAX_OFFLINE" ]; then

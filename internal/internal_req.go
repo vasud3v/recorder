@@ -204,14 +204,20 @@ func (h *Req) CreateRequest(ctx context.Context, url string) (*http.Request, con
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return nil, cancel, err
+		cancel()
+		return nil, nil, err
 	}
 	h.SetRequestHeaders(req)
 	
 	// Add small random delay to avoid being detected as bot
 	if !h.isMedia {
-		delay := time.Duration(500+time.Now().UnixNano()%1000) * time.Millisecond
-		time.Sleep(delay)
+		delay := time.Duration(500+(time.Now().UnixNano()%1000)) * time.Millisecond
+		select {
+		case <-ctx.Done():
+			cancel()
+			return nil, nil, ctx.Err()
+		case <-time.After(delay):
+		}
 	}
 	
 	return req, cancel, nil

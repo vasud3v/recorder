@@ -67,7 +67,10 @@ func PostChaturbateAPI(ctx context.Context, username, csrfToken string) (string,
 			}
 			return r
 		}, server.Config.Cookies)
-		cookieStr = sanitized + "; " + cookieStr
+		sanitized = strings.TrimSpace(sanitized)
+		if sanitized != "" {
+			cookieStr = sanitized + "; " + cookieStr
+		}
 	}
 	req.Header.Set("Cookie", cookieStr)
 	

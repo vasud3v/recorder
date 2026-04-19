@@ -118,11 +118,11 @@ func (u *GoFileUploader) uploadFile(server, filePath string) (string, error) {
 	errChan := make(chan error, 1)
 	go func() {
 		defer pipeWriter.Close()
-		defer writer.Close()
 
 		part, err := writer.CreateFormFile("file", filepath.Base(filePath))
 		if err != nil {
 			errChan <- fmt.Errorf("create form file: %w", err)
+			writer.Close()
 			return
 		}
 
@@ -130,6 +130,13 @@ func (u *GoFileUploader) uploadFile(server, filePath string) (string, error) {
 		buf := make([]byte, 1024*1024)
 		if _, err := io.CopyBuffer(part, file, buf); err != nil {
 			errChan <- fmt.Errorf("copy file: %w", err)
+			writer.Close()
+			return
+		}
+
+		// Close writer before signaling success to flush multipart boundary
+		if err := writer.Close(); err != nil {
+			errChan <- fmt.Errorf("close writer: %w", err)
 			return
 		}
 
@@ -146,6 +153,11 @@ func (u *GoFileUploader) uploadFile(server, filePath string) (string, error) {
 
 	resp, err := u.client.Do(req)
 	if err != nil {
+		// Drain error channel to prevent goroutine leak
+		select {
+		case <-errChan:
+		default:
+		}
 		return "", fmt.Errorf("do request: %w", err)
 	}
 	defer resp.Body.Close()

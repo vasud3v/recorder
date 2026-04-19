@@ -663,6 +663,9 @@ func (m *Manager) diskMonitor() {
 		recPath := recordingDir(server.Config.Pattern)
 		disk, err := getDiskStats(recPath)
 		if err != nil {
+			if server.Config.Debug {
+				fmt.Printf("[DEBUG] disk monitor: failed to get stats for %s: %v\n", recPath, err)
+			}
 			continue
 		}
 		pct := disk.Percent
@@ -673,6 +676,10 @@ func (m *Manager) diskMonitor() {
 		}
 		if warnThresh <= 0 {
 			warnThresh = 80
+		}
+		// Ensure warning threshold is less than critical
+		if warnThresh >= critThresh {
+			warnThresh = critThresh - 5
 		}
 		usedGB := float64(disk.Used) / 1e9
 		totalGB := float64(disk.Total) / 1e9

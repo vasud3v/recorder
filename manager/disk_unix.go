@@ -23,13 +23,18 @@ type DiskStats struct {
 func recordingDir(pattern string) string {
 	idx := strings.Index(pattern, "{{")
 	if idx == -1 {
-		return "."
+		// No template variables, use the directory of the pattern itself
+		dir := filepath.Dir(pattern)
+		if dir == "" || dir == "." {
+			return "."
+		}
+		return filepath.Clean(dir)
 	}
 	dir := filepath.Dir(pattern[:idx])
 	if dir == "" || dir == "." {
 		return "."
 	}
-	return dir
+	return filepath.Clean(dir)
 }
 
 func getDiskStats(path string) (DiskStats, error) {

@@ -345,15 +345,22 @@ jobs:
           echo "=== Processing Job Started ==="
           echo "Looking for completed .ts files to process..."
           
-          # Find all .ts files that have .uploaded marker
-          COMPLETED_FILES=$(find videos -type f -name "*.uploaded" 2>/dev/null || true)
+          # Find all .ts files that have .uploaded marker (limit to 100 per run)
+          COMPLETED_FILES=$(find videos -type f -name "*.uploaded" 2>/dev/null | head -100 || true)
           
           if [ -z "$COMPLETED_FILES" ]; then
             echo "No completed files found to process"
             exit 0
           fi
           
-          echo "Found $(echo "$COMPLETED_FILES" | wc -l) completed file(s) to process"
+          FILE_COUNT=$(echo "$COMPLETED_FILES" | wc -l)
+          echo "Found $FILE_COUNT completed file(s) to process (max 100 per run)"
+          
+          # Check if jq is available
+          if ! command -v jq &> /dev/null; then
+            echo "Error: jq is required but not installed"
+            exit 1
+          fi
           
           # Process each completed file
           for MARKER in $COMPLETED_FILES; do
@@ -378,10 +385,17 @@ jobs:
               
               # Step 2: Upload to GoFile
               echo "Uploading to GoFile..."
+              
+              # Get best server
+              echo "Getting best GoFile server..."
+              SERVER_RESPONSE=$(curl -s https://api.gofile.io/servers)
+              SERVER=$(echo "$SERVER_RESPONSE" | jq -r '.data.servers[0].name' 2>/dev/null || echo "store1")
+              echo "Using server: $SERVER"
+              
               UPLOAD_START=$(date +%s)
               
-              # Use curl to upload
-              UPLOAD_RESPONSE=$(curl -X POST https://store1.gofile.io/uploadFile \
+              # Upload to selected server
+              UPLOAD_RESPONSE=$(curl -X POST "https://${SERVER}.gofile.io/contents/uploadfile" \
                 -F "file=@$MP4_FILE" \
                 -w "\n%{http_code}" \
                 -s)

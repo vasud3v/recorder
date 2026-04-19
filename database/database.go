@@ -89,6 +89,11 @@ func (d *Database) Load() error {
 		legacyFile := "./conf/videos.json"
 		data, err = os.ReadFile(legacyFile)
 		if os.IsNotExist(err) {
+			// No database exists yet, initialize empty
+			d.records = []VideoRecord{}
+			d.index = make(map[string]*VideoRecord)
+			d.byUser = make(map[string][]*VideoRecord)
+			d.bySite = make(map[string][]*VideoRecord)
 			return nil
 		}
 		if err != nil {
@@ -215,13 +220,19 @@ func (d *Database) AddRecord(record VideoRecord) error {
 	
 	// Ensure required fields
 	if record.ID == "" {
-		record.ID = fmt.Sprintf("%s_%d", record.Username, time.Now().Unix())
+		record.ID = fmt.Sprintf("%s_%d", record.Username, time.Now().UnixNano())
 	}
 	if record.ChannelID == "" {
 		record.ChannelID = record.Site + "__" + record.Username
 	}
 	if record.Status == "" {
 		record.Status = "uploaded"
+	}
+	
+	// Check for duplicate ID
+	if _, exists := d.index[record.ID]; exists {
+		d.mu.Unlock()
+		return fmt.Errorf("record with ID %s already exists", record.ID)
 	}
 	
 	d.records = append(d.records, record)
@@ -231,7 +242,12 @@ func (d *Database) AddRecord(record VideoRecord) error {
 	
 	d.mu.Unlock()
 
-	return d.Save()
+	// Save immediately after adding
+	if err := d.Save(); err != nil {
+		return fmt.Errorf("save database after add: %w", err)
+	}
+	
+	return nil
 }
 
 // GetRecords returns all video records sorted by upload time (newest first)

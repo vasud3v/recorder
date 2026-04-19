@@ -218,8 +218,16 @@ func (ch *Channel) ScanTotalDiskUsage() {
 	prefix := ch.Config.Username
 	var total int64
 	for _, dir := range dirs {
+		// Check if directory exists before walking
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			continue
+		}
 		_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
+			if err != nil {
+				// Skip directories we can't access
+				return nil
+			}
+			if d.IsDir() {
 				return nil
 			}
 			if strings.HasPrefix(filepath.Base(path), prefix) {
@@ -305,6 +313,7 @@ func (ch *Channel) finalizeRecording(filename string) {
 	// Upload to GoFile if enabled
 	if server.Config.EnableGoFileUpload {
 		ch.Info("uploading `%s` to GoFile...", filepath.Base(finalPath))
+		ch.Info("database location: %s", dbFile)
 		
 		gofileUploader := uploader.NewGoFileUploader()
 		uploadStart := time.Now()
@@ -317,14 +326,19 @@ func (ch *Channel) finalizeRecording(filename string) {
 			
 			// Log failed upload to database
 			db := database.GetDB()
-			fileInfo, _ := os.Stat(finalPath)
+			ch.Info("database has %d existing records", len(db.GetRecords()))
+			
+			fileInfo, statErr := os.Stat(finalPath)
 			filesize := int64(0)
-			if fileInfo != nil {
+			if statErr == nil && fileInfo != nil {
 				filesize = fileInfo.Size()
 			}
 			
-			_ = db.AddRecord(database.VideoRecord{
-				ID:             fmt.Sprintf("%s_%d", ch.Config.Username, time.Now().Unix()),
+			recordID := fmt.Sprintf("%s_%d", ch.Config.Username, time.Now().UnixNano())
+			ch.Info("creating failed upload record with ID: %s", recordID)
+			
+			if addErr := db.AddRecord(database.VideoRecord{
+				ID:             recordID,
 				Username:       ch.Config.Username,
 				Site:           ch.Config.Site,
 				ChannelID:      fmt.Sprintf("%s__%s", ch.Config.Site, ch.Config.Username),
@@ -343,25 +357,36 @@ func (ch *Channel) finalizeRecording(filename string) {
 				UploadSpeed:    0,
 				Status:         "failed",
 				ErrorMessage:   err.Error(),
-			})
+			}); addErr != nil {
+				ch.Error("failed to save failed upload record: %s", addErr.Error())
+			} else {
+				ch.Info("failed upload logged to database (now %d records)", len(db.GetRecords()))
+			}
 		} else {
 			ch.Info("upload successful: %s", downloadLink)
 			
 			// Get file info for database record
-			fileInfo, _ := os.Stat(finalPath)
+			db := database.GetDB()
+			ch.Info("database has %d existing records", len(db.GetRecords()))
+			
+			fileInfo, statErr := os.Stat(finalPath)
 			filesize := int64(0)
 			uploadSpeed := 0.0
-			if fileInfo != nil {
+			if statErr == nil && fileInfo != nil {
 				filesize = fileInfo.Size()
 				if uploadDuration > 0 {
 					uploadSpeed = float64(filesize) / uploadDuration / 1024 / 1024 // MB/s
 				}
+			} else if statErr != nil {
+				ch.Error("failed to stat file for database record: %s", statErr.Error())
 			}
 			
+			recordID := fmt.Sprintf("%s_%d", ch.Config.Username, time.Now().UnixNano())
+			ch.Info("creating upload record with ID: %s", recordID)
+			
 			// Store in database
-			db := database.GetDB()
 			record := database.VideoRecord{
-				ID:             fmt.Sprintf("%s_%d", ch.Config.Username, time.Now().Unix()),
+				ID:             recordID,
 				Username:       ch.Config.Username,
 				Site:           ch.Config.Site,
 				ChannelID:      fmt.Sprintf("%s__%s", ch.Config.Site, ch.Config.Username),
@@ -384,10 +409,15 @@ func (ch *Channel) finalizeRecording(filename string) {
 			if err := db.AddRecord(record); err != nil {
 				ch.Error("failed to save record to database: %s", err.Error())
 			} else {
-				ch.Info("video record saved to database")
+				ch.Info("video record saved to database (now %d records)", len(db.GetRecords()))
 				// Create backup every 10 uploads
-				if len(db.GetRecords()) % 10 == 0 {
-					_ = db.Backup()
+				records := db.GetRecords()
+				if len(records) > 0 && len(records)%10 == 0 {
+					if backupErr := db.Backup(); backupErr != nil {
+						ch.Error("failed to create database backup: %s", backupErr.Error())
+					} else {
+						ch.Info("database backup created")
+					}
 				}
 			}
 			
@@ -445,7 +475,7 @@ func (ch *Channel) finalizeRecordingAsync(filename string) {
 		}
 	} else if strings.HasSuffix(filename, ".mp4") {
 		if err := chaturbate.BuildSeekIndex(filename); err != nil {
-			log.Printf("WARN  seek index %s: %v", filename, err)
+			ch.Error("seek index %s: %v", filename, err)
 		}
 	}
 

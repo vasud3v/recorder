@@ -369,7 +369,7 @@ jobs:
               --resolution "$RESOLUTION" \
               --framerate "$FRAMERATE" \
               --interval "$INTERVAL" \
-              --max-duration 0 \
+              --max-duration "$MAX_DURATION" \
               --max-filesize 0 \
               --completed-dir videos/completed \
               --finalize-mode none \
@@ -428,7 +428,7 @@ jobs:
                     --resolution "$RESOLUTION" \
                     --framerate "$FRAMERATE" \
                     --interval "$INTERVAL" \
-                    --max-duration 0 \
+                    --max-duration "$MAX_DURATION" \
                     --max-filesize 0 \
                     --completed-dir videos/completed \
                     --finalize-mode none \

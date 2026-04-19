@@ -335,6 +335,12 @@ func ParseCookies(cookieStr string) map[string]string {
 			// Trim spaces around key and value
 			key := strings.TrimSpace(parts[0])
 			value := strings.TrimSpace(parts[1])
+			
+			// Clean invalid characters from cookie values
+			value = strings.ReplaceAll(value, `"`, ``)  // Remove quotes
+			value = strings.ReplaceAll(value, "\n", "") // Remove newlines
+			value = strings.ReplaceAll(value, "\r", "") // Remove carriage returns
+			
 			// Store cookie name and value in the map
 			cookies[key] = value
 		}

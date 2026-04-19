@@ -353,12 +353,23 @@ jobs:
             echo "═══ Attempt #$ATTEMPT  $(date '+%Y-%m-%d %H:%M:%S') ═══"
 
             # Use longer timeout for first connection attempt (FlareSolverr needs time)
+            # BUT if run_once is enabled, limit to recording duration + connection buffer
             if [ "$ATTEMPT" -eq 1 ] && [ "$RECORDED" = "false" ]; then
-              CURRENT_TIMEOUT=$INITIAL_TIMEOUT
-              echo "🔄 First connection attempt - allowing ${CURRENT_TIMEOUT}min for FlareSolverr to bypass Cloudflare"
+              if [ "${{ inputs.run_once }}" = "true" ]; then
+                # For run_once: give 5 min for connection + 1 min recording = 6 min total
+                CURRENT_TIMEOUT=$((REC_TIMEOUT + 5))
+                echo "🔄 First attempt (run once) - ${CURRENT_TIMEOUT}min timeout (5min connection + ${REC_TIMEOUT}min recording)"
+              else
+                CURRENT_TIMEOUT=$INITIAL_TIMEOUT
+                echo "🔄 First connection attempt - allowing ${CURRENT_TIMEOUT}min for FlareSolverr to bypass Cloudflare"
+              fi
             else
               CURRENT_TIMEOUT=$REC_TIMEOUT
-              echo "📹 Recording ${CURRENT_TIMEOUT}-minute video chunk"
+              if [ "${{ inputs.run_once }}" = "true" ]; then
+                echo "📹 Recording ${CURRENT_TIMEOUT}-minute video (run once mode)"
+              else
+                echo "📹 Recording ${CURRENT_TIMEOUT}-minute video chunk"
+              fi
             fi
 
             timeout --kill-after=30 ${CURRENT_TIMEOUT}m ./goondvr \
@@ -382,6 +393,12 @@ jobs:
               RECORDED=true
               ATTEMPT=0  # Reset attempt counter after successful recording
               echo "✅ Connection established - now recording ${REC_TIMEOUT}-minute video chunks"
+              
+              # If run_once is enabled, stop immediately after first successful recording
+              if [ "${{ inputs.run_once }}" = "true" ]; then
+                echo "🛑 Run Once enabled - stopping after successful recording"
+                break
+              fi
             fi
 
             # Timeout (124) = stream was/is live, loop for next chunk

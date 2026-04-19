@@ -765,6 +765,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       actions: write
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -785,12 +786,11 @@ jobs:
             echo '{"records":[]}' > database/uploads.json
           fi
 
-          shopt -s nullglob
-          for db in db-artifacts/**/database/uploads.json; do
+          while IFS= read -r db; do
             echo "Merging $db..."
             jq -s '{records: (.[0].records + .[1].records | unique_by(.id))}' database/uploads.json "$db" > db_tmp.json
             mv db_tmp.json database/uploads.json
-          done
+          done < <(find db-artifacts -type f -name "uploads.json" 2>/dev/null)
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

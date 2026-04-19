@@ -226,7 +226,7 @@ jobs:
           USER_AGENT: ${{ secrets.USER_AGENT }}
           FLARESOLVERR_URL: http://localhost:8191/v1
         run: |
-          mkdir -p videos conf
+          mkdir -p videos
 
           # ── Parameters ─────────────────────────────────────────────
           MAX_DURATION="${{ inputs.max_duration || '45' }}"
@@ -262,21 +262,6 @@ jobs:
           fi
 
           echo "Cookie length: ${#CLEAN_COOKIES} | UA length: ${#CLEAN_UA}"
-
-          jq -n \
-            --arg cookies "$CLEAN_COOKIES" \
-            --arg ua "$CLEAN_UA" \
-            '{
-              cookies: $cookies,
-              user_agent: $ua,
-              finalize_mode: "none",
-              enable_gofile_upload: false,
-              completed_dir: "",
-              ffmpeg_encoder: "libx264",
-              ffmpeg_container: "mp4",
-              ffmpeg_quality: 23,
-              ffmpeg_preset: "medium"
-            }' > conf/settings.json
 
           # ── Background monitor ─────────────────────────────────────
           # Watches disk space and detects when the stream stops producing data.
@@ -362,11 +347,15 @@ jobs:
             timeout --kill-after=30 ${REC_TIMEOUT}m ./goondvr \
               -u "${{ matrix.channel.username }}" \
               --site "${{ matrix.channel.site }}" \
-              -resolution "$RESOLUTION" \
-              -framerate "$FRAMERATE" \
-              -interval "$INTERVAL" \
-              -max-duration "$MAX_DURATION" \
-              -max-filesize 0 \
+              --cookies "$CLEAN_COOKIES" \
+              --user-agent "$CLEAN_UA" \
+              --resolution "$RESOLUTION" \
+              --framerate "$FRAMERATE" \
+              --interval "$INTERVAL" \
+              --max-duration "$MAX_DURATION" \
+              --max-filesize 0 \
+              --completed-dir videos/completed \
+              --finalize-mode none \
               $DEBUG_FLAG
 
             RC=$?

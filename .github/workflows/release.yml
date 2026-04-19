@@ -197,6 +197,15 @@ jobs:
           go mod download
           go build -o goondvr .
 
+      - name: Restore offline streak
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: streak/
+          key: streak-${{ matrix.channel.username }}-${{ matrix.channel.site }}-${{ github.run_id }}
+          restore-keys: |
+            streak-${{ matrix.channel.username }}-${{ matrix.channel.site }}-
+
       - name: Wait for FlareSolverr
         run: |
           echo "Waiting for FlareSolverr..."
@@ -413,8 +422,36 @@ jobs:
           echo "Files: $TOTAL_FILES | Size: $TOTAL_SIZE"
           find videos -type f \( -name "*.ts" -o -name "*.mp4" \) -exec ls -lh {} \; 2>/dev/null || true
 
-          # Set output for downstream jobs
+          # ── Offline streak tracking ────────────────────────────────
+          # Counts how many consecutive runs produced zero recordings.
+          # Used by the restart job to stop auto-restarting if a streamer
+          # has been offline for a very long time.
+          mkdir -p streak
+          STREAK_FILE="streak/${{ matrix.channel.username }}-${{ matrix.channel.site }}.txt"
+          PREV_STREAK=$(cat "$STREAK_FILE" 2>/dev/null | grep -oE '^[0-9]+' || echo "0")
+
+          if [ "$TOTAL_FILES" -gt 0 ]; then
+            NEW_STREAK=0
+            echo "✓ Recorded — offline streak reset (was $PREV_STREAK)"
+          else
+            NEW_STREAK=$((PREV_STREAK + 1))
+            echo "⚠️  Nothing recorded — offline streak: $NEW_STREAK"
+          fi
+
+          # Write streak file: count + last-updated timestamp
+          echo "$NEW_STREAK $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STREAK_FILE"
+
+          # Set outputs for downstream jobs
           echo "has-files=$([ "$TOTAL_FILES" -gt 0 ] && echo true || echo false)" >> $GITHUB_OUTPUT
+          echo "offline-streak=$NEW_STREAK" >> $GITHUB_OUTPUT
+
+      # Persist offline streak counters across runs
+      - name: Save offline streak
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: streak/
+          key: streak-${{ matrix.channel.username }}-${{ matrix.channel.site }}-${{ github.run_id }}
 
       # Upload raw recordings as artifacts for the process job
       - name: Upload recordings
@@ -731,6 +768,19 @@ jobs:
     permissions:
       actions: write
     steps:
+      - uses: actions/checkout@v4
+
+      # Restore all per-channel streak counters
+      - name: Restore offline streaks
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: streak/
+          # Restore the latest streak for any channel in this run
+          key: streak-all-${{ github.run_id }}
+          restore-keys: |
+            streak-
+
       - name: Evaluate restart
         id: eval
         run: |
@@ -738,15 +788,52 @@ jobs:
           PROCESS="${{ needs.process.result }}"
           echo "Record: $RECORD | Process: $PROCESS"
 
+          # ── Hard stop: both jobs failed ────────────────────────────
           FAILURES=0
           [ "$RECORD" = "failure" ] && FAILURES=$((FAILURES + 1))
           [ "$PROCESS" = "failure" ] && FAILURES=$((FAILURES + 1))
 
           if [ "$FAILURES" -ge 2 ]; then
             echo "restart=false" >> $GITHUB_OUTPUT
-            echo "⚠️  Both jobs failed — skipping restart to prevent loop"
+            echo "⚠️  Both jobs failed — skipping restart to prevent crash loop"
+            exit 0
+          fi
+
+          # ── Offline streak check ───────────────────────────────────
+          # If EVERY channel has been offline for more than MAX_OFFLINE_RUNS
+          # consecutive runs, stop restarting — the streamer(s) are likely
+          # on an extended break. The scheduled cron will still run and
+          # reset the streak the moment anyone comes back online.
+          #
+          # At 5h schedule: 72 runs ≈ 15 days
+          MAX_OFFLINE_RUNS=72
+
+          CHANNELS_TOTAL=0
+          CHANNELS_OVER_LIMIT=0
+
+          if [ -d streak ]; then
+            while IFS= read -r STREAK_FILE; do
+              STREAK=$(cat "$STREAK_FILE" 2>/dev/null | grep -oE '^[0-9]+' || echo "0")
+              CHANNELS_TOTAL=$((CHANNELS_TOTAL + 1))
+              echo "  $(basename $STREAK_FILE): streak=$STREAK"
+              if [ "$STREAK" -ge "$MAX_OFFLINE_RUNS" ]; then
+                CHANNELS_OVER_LIMIT=$((CHANNELS_OVER_LIMIT + 1))
+              fi
+            done < <(find streak -type f -name "*.txt" 2>/dev/null)
+          fi
+
+          echo "Channels total: $CHANNELS_TOTAL | Over limit: $CHANNELS_OVER_LIMIT"
+
+          if [ "$CHANNELS_TOTAL" -gt 0 ] && [ "$CHANNELS_TOTAL" -eq "$CHANNELS_OVER_LIMIT" ]; then
+            echo "restart=false" >> $GITHUB_OUTPUT
+            echo "🛑 All channels offline for 15+ days — pausing auto-restart"
+            echo "   Scheduled crons will continue to run naturally."
+            echo "   Streak will reset automatically when any streamer goes live."
           else
             echo "restart=true" >> $GITHUB_OUTPUT
+            if [ "$CHANNELS_OVER_LIMIT" -gt 0 ]; then
+              echo "ℹ️  $CHANNELS_OVER_LIMIT/$CHANNELS_TOTAL channels over streak limit (others still active)"
+            fi
           fi
 
       - name: Wait before restart

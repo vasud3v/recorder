@@ -281,6 +281,7 @@ jobs:
           INTERVAL="${{ inputs.interval || '1' }}"
           DEBUG_FLAG="${{ inputs.debug == true && '--debug' || '' }}"
 
+          echo "::group::Initialization"
           echo "╔══════════════════════════════════════════════════╗"
           echo "║  Channel : $USERNAME @ $SITE"
           echo "║  Chunk   : ${MAX_DURATION}min  Res: ${RESOLUTION}p  FPS: ${FRAMERATE}"
@@ -303,6 +304,7 @@ jobs:
           if [[ -z "$CLEAN_UA" ]]; then
             CLEAN_UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
           fi
+          echo "::endgroup::"
 
           mkdir -p videos/completed
 
@@ -320,10 +322,13 @@ jobs:
               CURR=$(du -sb videos 2>/dev/null | cut -f1 || echo 0)
               FCOUNT=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l)
               SIZE_MB=$(awk "BEGIN{printf \"%.1f\", $CURR/1048576}")
-              echo "📊 disk=${AVAIL}GB | files=${FCOUNT} | size=${SIZE_MB}MB"
+              
+              if [[ "$FCOUNT" -gt 0 ]]; then
+                echo "⏳ [MONITOR] Disk: ${AVAIL}GB | Recording: ${FCOUNT} file(s) | Size: ${SIZE_MB}MB"
+              fi
 
               if [[ "$AVAIL" -lt 1 ]]; then
-                echo "🛑 Critical disk — stopping"
+                echo "🛑 [MONITOR] Critical disk space — stopping"
                 pkill -f goondvr || true; break
               fi
 
@@ -332,9 +337,9 @@ jobs:
                   STALE=0
                 else
                   STALE=$(( STALE + 1 ))
-                  echo "⚠️  No growth ($STALE/$MAX_STALE)"
+                  echo "⚠️  [MONITOR] No file growth detected ($STALE/$MAX_STALE)"
                   if [[ "$STALE" -ge "$MAX_STALE" ]]; then
-                    echo "🛑 Stream stalled — stopping"
+                    echo "🛑 [MONITOR] Stream stalled — cleanly stopping goondvr"
                     pkill -f goondvr || true; break
                   fi
                 fi
@@ -368,8 +373,7 @@ jobs:
 
           while true; do
             ATTEMPT=$(( ATTEMPT + 1 ))
-            echo ""
-            echo "═══ Attempt #$ATTEMPT  $(date '+%H:%M:%S') ═══"
+            echo "::group::Attempt #$ATTEMPT ($(date '+%H:%M:%S'))"
 
             RC=0
             timeout --kill-after=60 $(( MAX_DURATION + 2 ))m \
@@ -387,6 +391,7 @@ jobs:
             # run_once: bail immediately after the first chunk
             if [[ "${{ inputs.run_once || 'false' }}" == "true" && "$RECORDED" == "true" ]]; then
               echo "🛑 run_once — stopping after first recording"
+              echo "::endgroup::"
               break
             fi
 
@@ -394,6 +399,7 @@ jobs:
             if [[ "$RC" -eq 124 ]]; then
               echo "⏱️ Chunk complete — starting next chunk"
               OFFLINE_COUNT=0
+              echo "::endgroup::"
               continue
             fi
 
@@ -403,16 +409,19 @@ jobs:
               echo "Stream offline? ($OFFLINE_COUNT/$MAX_OFFLINE)"
               if [[ "$OFFLINE_COUNT" -ge "$MAX_OFFLINE" ]]; then
                 echo "🎬 Stream ended — moving to upload"
+                echo "::endgroup::"
                 break
               fi
             else
               if [[ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]]; then
                 echo "⏸️ Stream never came online after $MAX_ATTEMPTS attempts — skipping"
+                echo "::endgroup::"
                 break
               fi
               echo "Waiting for stream… ($ATTEMPT/$MAX_ATTEMPTS)"
             fi
 
+            echo "::endgroup::"
             sleep $(( INTERVAL * 60 ))
           done
 
@@ -471,6 +480,7 @@ jobs:
         if: steps.record.outputs.has-files == 'true'
         run: |
           mkdir -p videos/mp4
+          echo "::group::Convert .ts → .mp4"
 
           find videos/completed -type f -name "*.ts" | sort | while read -r f; do
             BASE=$(basename "$f" .ts)
@@ -490,6 +500,7 @@ jobs:
             mv "$f" "videos/mp4/$(basename "$f")"
           done
 
+          echo "::endgroup::"
           echo "Files ready to upload:"
           ls -lh videos/mp4/ 2>/dev/null || echo "(none)"
 
@@ -517,8 +528,8 @@ jobs:
             FNAME=$(basename "$FILE")
             FSIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
             FSIZE_MB=$(awk "BEGIN{printf \"%.1f\", $FSIZE/1048576}")
-            echo ""
-            echo "── Uploading: $FNAME (${FSIZE_MB} MB) ──"
+            
+            echo "::group::📤 Upload: $FNAME (${FSIZE_MB} MB)"
 
             LINK=""
             for RETRY in 1 2 3; do
@@ -558,6 +569,7 @@ jobs:
 
             if [[ -z "$LINK" ]]; then
               echo "  ✗ All retries failed for $FNAME — file preserved in artifact"
+              echo "::endgroup::"
               continue
             fi
 
@@ -588,6 +600,7 @@ jobs:
 
             rm -f "$FILE"
             echo "  ✓ Cleaned up local file"
+            echo "::endgroup::"
           done
 
           echo "Upload pass complete for $USERNAME"

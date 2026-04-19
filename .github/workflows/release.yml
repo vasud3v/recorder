@@ -360,7 +360,6 @@ jobs:
               CURRENT_TIMEOUT=$REC_TIMEOUT
               echo "📹 Recording ${CURRENT_TIMEOUT}-minute video chunk"
             fi
-            fi
 
             timeout --kill-after=30 ${CURRENT_TIMEOUT}m ./goondvr \
               -u "${{ matrix.channel.username }}" \

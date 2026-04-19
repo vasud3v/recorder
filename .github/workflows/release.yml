@@ -559,38 +559,132 @@ jobs:
           echo "║  Upload: ${{ matrix.channel.username }}"
           echo "╚══════════════════════════════════════════════════════╝"
           
-          # Convert videos to MP4
+          # Get current date for database organization
+          CURRENT_DATE=$(date -u +%Y-%m-%d)
+          STREAMER_DB="database/${{ matrix.channel.username }}"
+          STREAMER_DATE_DB="$STREAMER_DB/$CURRENT_DATE"
+          mkdir -p "$STREAMER_DATE_DB"
+
+          # Initialize database structure using jq (more reliable in GitHub Actions)
+          STATS_FILE="$STREAMER_DB/stats.json"
+          RECORDINGS_FILE="$STREAMER_DATE_DB/recordings.json"
+          
+          if [ ! -f "$STATS_FILE" ]; then
+            echo "{\"username\":\"${{ matrix.channel.username }}\",\"site\":\"${{ matrix.channel.site }}\",\"created_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"last_updated\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"statistics\":{\"total_recordings\":0,\"total_size_gb\":0.0,\"total_duration_hours\":0.0,\"total_days_recorded\":0,\"first_recording_date\":null,\"last_recording_date\":null}}" > "$STATS_FILE"
+          fi
+          
+          if [ ! -f "$RECORDINGS_FILE" ]; then
+            echo "{\"date\":\"$CURRENT_DATE\",\"username\":\"${{ matrix.channel.username }}\",\"recordings\":[],\"summary\":{\"total_recordings\":0,\"total_size_bytes\":0,\"total_size_mb\":0.0,\"total_duration_seconds\":0,\"total_duration_minutes\":0.0,\"first_recording_time\":null,\"last_recording_time\":null}}" > "$RECORDINGS_FILE"
+          fi
+          
+          # Process and upload videos
           for file in videos/completed/*.ts videos/completed/*.mp4 2>/dev/null; do
             [ -f "$file" ] || continue
             
-            base=$(basename "$file" .ts)
-            base=$(basename "$base" .mp4)
-            output="videos/completed/${base}_final.mp4"
+            BASENAME=$(basename "$file")
+            EXT="${BASENAME##*.}"
+            NAME="${BASENAME%.*}"
             
+            echo ""
+            echo "── Processing: $BASENAME ──"
+            
+            # Convert if needed
             if [[ "$file" == *.ts ]]; then
+              MP4_FILE="videos/completed/${NAME}.mp4"
               echo "Converting $file to MP4..."
-              ffmpeg -i "$file" -c copy -movflags +faststart "$output" -y || {
+              if ffmpeg -i "$file" -c copy -movflags +faststart "$MP4_FILE" -y 2>&1 | tail -5; then
+                echo "✓ Converted to MP4"
+                OUTPUT_FILE="$MP4_FILE"
+              else
                 echo "⚠️  Conversion failed, uploading original"
-                output="$file"
-              }
+                OUTPUT_FILE="$file"
+              fi
             else
-              output="$file"
+              OUTPUT_FILE="$file"
             fi
+            
+            # Get file size
+            FILE_SIZE=$(stat -c%s "$OUTPUT_FILE" 2>/dev/null || echo "0")
+            FILE_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $FILE_SIZE / 1048576}")
             
             # Upload to GoFile
             if [ -n "$GOFILE_TOKEN" ]; then
-              echo "📤 Uploading $(basename "$output") to GoFile..."
-              python upload_to_gofile.py "$output" || echo "⚠️  Upload failed"
+              echo "📤 Uploading $(basename "$OUTPUT_FILE") (${FILE_SIZE_MB}MB) to GoFile..."
               
-              # Delete after successful upload
-              if [ $? -eq 0 ]; then
-                rm -f "$file" "$output"
-                echo "✓ Deleted local file after upload"
+              UPLOAD_START=$(date +%s)
+              if python3 upload_to_gofile.py "$OUTPUT_FILE"; then
+                UPLOAD_END=$(date +%s)
+                UPLOAD_DURATION=$((UPLOAD_END - UPLOAD_START))
+                UPLOAD_SPEED=$(awk "BEGIN {printf \"%.2f\", $FILE_SIZE / $UPLOAD_DURATION / 1048576}")
+                
+                # Extract link from the upload script output
+                DOWNLOAD_LINK=$(jq -r '.uploads[-1].download_page // empty' database/backups/uploaded_links.json 2>/dev/null)
+                
+                if [ -n "$DOWNLOAD_LINK" ]; then
+                  echo "✓ Uploaded successfully: $DOWNLOAD_LINK"
+                  
+                  # Save to database using jq (more reliable than Python in GitHub Actions)
+                  RECORD=$(jq -n \
+                    --arg id "${{ matrix.channel.username }}_$(date +%s)_${RANDOM}" \
+                    --arg user "${{ matrix.channel.username }}" \
+                    --arg site "${{ matrix.channel.site }}" \
+                    --arg file "$(basename "$OUTPUT_FILE")" \
+                    --arg link "$DOWNLOAD_LINK" \
+                    --arg time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                    --argjson size "$FILE_SIZE" \
+                    --argjson dur "$UPLOAD_DURATION" \
+                    --arg speed "$UPLOAD_SPEED" \
+                    '{
+                      id: $id, username: $user, site: $site,
+                      filename: $file, gofile_link: $link,
+                      uploaded_at: $time, filesize_bytes: $size,
+                      upload_duration: $dur, upload_speed: ($speed | tonumber),
+                      status: "uploaded"
+                    }')
+                  
+                  # Add to recordings file
+                  if jq ".recordings += [$RECORD]" "$RECORDINGS_FILE" > "$RECORDINGS_FILE.tmp" 2>/dev/null; then
+                    mv "$RECORDINGS_FILE.tmp" "$RECORDINGS_FILE"
+                    
+                    # Update summary
+                    jq '
+                      .summary.total_recordings = (.recordings | length) |
+                      .summary.total_size_bytes = ([.recordings[].filesize_bytes] | add // 0) |
+                      .summary.total_size_mb = ((.summary.total_size_bytes / 1048576) * 100 | round / 100) |
+                      .summary.first_recording_time = (.recordings[0].uploaded_at) |
+                      .summary.last_recording_time = (.recordings[-1].uploaded_at)
+                    ' "$RECORDINGS_FILE" > "$RECORDINGS_FILE.tmp"
+                    mv "$RECORDINGS_FILE.tmp" "$RECORDINGS_FILE"
+                    
+                    echo "✓ Saved to database: $RECORDINGS_FILE"
+                  else
+                    echo "⚠️  Database save failed"
+                  fi
+                  
+                  # Delete local files after successful upload and database save
+                  rm -f "$file" "$OUTPUT_FILE"
+                  echo "✓ Cleaned up local files"
+                else
+                  echo "⚠️  Could not extract download link"
+                fi
+              else
+                echo "⚠️  Upload failed"
               fi
             fi
           done
           
-          echo "✓ Immediate upload complete for ${{ matrix.channel.username }}"
+          echo ""
+          echo "✓ Upload complete for ${{ matrix.channel.username }}"
+
+      - name: Upload database artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uploads-db-${{ matrix.channel.username }}-${{ matrix.channel.site }}
+          path: database/
+          retention-days: 30
+          if-no-files-found: ignore
+          compression-level: 9
 
   # ---------------------------------------------------------------------------
   # PROCESS — convert to MP4, upload to GoFile (runs independently, checks continuously)

@@ -162,7 +162,7 @@ jobs:
           USER_AGENT: ${{ secrets.USER_AGENT }}
           FLARESOLVERR_URL: http://localhost:8191/v1
         run: |
-          mkdir -p videos conf database/backups
+          mkdir -p videos conf database/backups processing-queue
           
           # Sanitize cookies - remove any newlines or control characters
           CLEAN_COOKIES=$(echo "$COOKIES" | tr -d '\n\r\t' | tr -s ' ')
@@ -172,14 +172,14 @@ jobs:
           echo "Cookie string length: ${#CLEAN_COOKIES}"
           echo "User agent length: ${#CLEAN_UA}"
           
-          # Create settings.json using jq for proper JSON escaping
+          # Create settings.json - DISABLE upload, only record
           jq -n \
             --arg cookies "$CLEAN_COOKIES" \
             --arg ua "$CLEAN_UA" \
             '{
               cookies: $cookies,
               user_agent: $ua,
-              finalize_mode: "remux",
+              finalize_mode: "none",
               ffmpeg_encoder: "libx264",
               ffmpeg_container: "mp4",
               ffmpeg_quality: 23,
@@ -189,7 +189,7 @@ jobs:
           # Debug: Verify settings.json was created properly
           echo "Settings file created, size: $(wc -c < conf/settings.json) bytes"
           
-          # Save PID for cleanup
+          # Record without conversion/upload - just save .ts files
           timeout 5h ./goondvr \
             -u "${{ matrix.channel.username }}" \
             --site "${{ matrix.channel.site }}" \
@@ -198,65 +198,25 @@ jobs:
             -interval 1 \
             -max-duration 240 \
             -max-filesize 0 \
-            --enable-gofile-upload \
-            --debug &
+            --debug || {
+              echo "Recording ended with code $?"
+              echo "This is normal - streamer may be offline or timeout reached"
+            }
           
-          GOONDVR_PID=$!
-          echo "GOONDVR_PID=$GOONDVR_PID" >> $GITHUB_ENV
-          echo "Recording started with PID: $GOONDVR_PID"
-          
-          # Wait for the process or timeout
-          wait $GOONDVR_PID || {
-            EXIT_CODE=$?
-            echo "Recording ended with code $EXIT_CODE"
-            echo "This is normal - streamer may be offline or timeout reached"
-          }
-      
-      - name: Cleanup and finalize recordings
-        if: always()
-        run: |
-          echo "=== Cleanup Started ==="
-          
-          # If goondvr is still running, send SIGTERM for graceful shutdown
-          if [ ! -z "$GOONDVR_PID" ] && kill -0 $GOONDVR_PID 2>/dev/null; then
-            echo "Sending graceful shutdown signal to goondvr (PID: $GOONDVR_PID)..."
-            kill -TERM $GOONDVR_PID
-            
-            # Wait up to 10 minutes for finalization
-            echo "Waiting for recordings to finalize (max 10 minutes)..."
-            for i in {1..600}; do
-              if ! kill -0 $GOONDVR_PID 2>/dev/null; then
-                echo "Finalization complete!"
-                break
-              fi
-              if [ $((i % 30)) -eq 0 ]; then
-                echo "Still finalizing... ($i seconds elapsed)"
-              fi
-              sleep 1
-            done
-            
-            # Force kill if still running
-            if kill -0 $GOONDVR_PID 2>/dev/null; then
-              echo "Force killing after timeout..."
-              kill -9 $GOONDVR_PID 2>/dev/null || true
-            fi
-          fi
-          
-          # Show upload summary
-          echo "=== Upload Summary ==="
-          if [ -f database/uploads.json ]; then
-            echo "Database file exists, size: $(wc -c < database/uploads.json) bytes"
-            echo "Number of records: $(jq '.records | length' database/uploads.json 2>/dev/null || echo '0')"
-            echo "Recent uploads:"
-            jq -r '.records[-5:] | .[] | "\(.uploaded_at) - \(.filename) - \(.status) - \(.gofile_link)"' database/uploads.json 2>/dev/null || echo "No records found"
-          else
-            echo "No database file found"
-          fi
-          
-          echo ""
-          echo "=== Local Video Files ==="
-          find videos -type f \( -name "*.ts" -o -name "*.mp4" \) -exec ls -lh {} \; 2>/dev/null || echo "No video files found"
+          # List completed recordings
+          echo "=== Completed Recordings ==="
+          find videos -type f -name "*.ts" -exec ls -lh {} \;
           echo "======================"
+      
+      - name: Upload raw recordings for processing
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-videos-${{ matrix.channel.username }}-${{ github.run_number }}
+          path: videos/**/*.ts
+          retention-days: 1
+          if-no-files-found: ignore
+          compression-level: 0
       
       - uses: actions/cache/save@v4
         if: always()
@@ -275,10 +235,172 @@ jobs:
           if-no-files-found: ignore
           compression-level: 9
 
+  # Dedicated job for processing: convert, upload, delete
+  process:
+    if: "!startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true'"
+    needs: [setup, record]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      matrix:
+        channel: ${{ fromJson(needs.setup.outputs.channels) }}
+      fail-fast: false
+      max-parallel: 5
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      
+      - name: Download raw recordings
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: raw-videos-${{ matrix.channel.username }}-${{ github.run_number }}
+          path: videos/
+      
+      - name: Restore database
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: database/
+          key: state-${{ matrix.channel.username }}-${{ github.run_id }}
+          restore-keys: state-${{ matrix.channel.username }}-
+      
+      - name: Process recordings
+        run: |
+          mkdir -p database/backups processed
+          
+          echo "=== Processing Job Started ==="
+          echo "Looking for .ts files to process..."
+          
+          # Find all .ts files
+          TS_FILES=$(find videos -type f -name "*.ts" 2>/dev/null || true)
+          
+          if [ -z "$TS_FILES" ]; then
+            echo "No .ts files found to process"
+            exit 0
+          fi
+          
+          echo "Found $(echo "$TS_FILES" | wc -l) file(s) to process"
+          
+          # Process each file
+          for TS_FILE in $TS_FILES; do
+            BASENAME=$(basename "$TS_FILE" .ts)
+            MP4_FILE="processed/${BASENAME}.mp4"
+            
+            echo ""
+            echo "=== Processing: $BASENAME ==="
+            echo "Input: $TS_FILE ($(du -h "$TS_FILE" | cut -f1))"
+            
+            # Step 1: Convert to MP4
+            echo "Converting to MP4..."
+            if ffmpeg -nostdin -y -i "$TS_FILE" -c copy -movflags +faststart "$MP4_FILE" 2>&1 | tail -20; then
+              echo "✓ Conversion successful: $MP4_FILE ($(du -h "$MP4_FILE" | cut -f1))"
+              
+              # Step 2: Upload to GoFile
+              echo "Uploading to GoFile..."
+              UPLOAD_START=$(date +%s)
+              
+              # Use curl to upload
+              UPLOAD_RESPONSE=$(curl -X POST https://store1.gofile.io/uploadFile \
+                -F "file=@$MP4_FILE" \
+                -w "\n%{http_code}" \
+                -s)
+              
+              HTTP_CODE=$(echo "$UPLOAD_RESPONSE" | tail -1)
+              RESPONSE_BODY=$(echo "$UPLOAD_RESPONSE" | head -n -1)
+              
+              UPLOAD_END=$(date +%s)
+              UPLOAD_DURATION=$((UPLOAD_END - UPLOAD_START))
+              
+              if [ "$HTTP_CODE" = "200" ]; then
+                DOWNLOAD_LINK=$(echo "$RESPONSE_BODY" | jq -r '.data.downloadPage' 2>/dev/null || echo "")
+                
+                if [ ! -z "$DOWNLOAD_LINK" ] && [ "$DOWNLOAD_LINK" != "null" ]; then
+                  echo "✓ Upload successful!"
+                  echo "  Link: $DOWNLOAD_LINK"
+                  echo "  Duration: ${UPLOAD_DURATION}s"
+                  
+                  # Save to database
+                  FILESIZE=$(stat -f%z "$MP4_FILE" 2>/dev/null || stat -c%s "$MP4_FILE" 2>/dev/null || echo "0")
+                  UPLOAD_SPEED=$(echo "scale=2; $FILESIZE / $UPLOAD_DURATION / 1024 / 1024" | bc 2>/dev/null || echo "0")
+                  
+                  # Create/update database
+                  if [ ! -f database/uploads.json ]; then
+                    echo '{"records":[]}' > database/uploads.json
+                  fi
+                  
+                  RECORD=$(jq -n \
+                    --arg id "${{ matrix.channel.username }}_$(date +%s)" \
+                    --arg username "${{ matrix.channel.username }}" \
+                    --arg site "${{ matrix.channel.site }}" \
+                    --arg filename "$BASENAME.mp4" \
+                    --arg link "$DOWNLOAD_LINK" \
+                    --arg uploaded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                    --arg filesize "$FILESIZE" \
+                    --arg upload_duration "$UPLOAD_DURATION" \
+                    --arg upload_speed "$UPLOAD_SPEED" \
+                    '{
+                      id: $id,
+                      username: $username,
+                      site: $site,
+                      filename: $filename,
+                      gofile_link: $link,
+                      uploaded_at: $uploaded_at,
+                      filesize_bytes: ($filesize | tonumber),
+                      upload_duration: ($upload_duration | tonumber),
+                      upload_speed: ($upload_speed | tonumber),
+                      status: "uploaded"
+                    }')
+                  
+                  jq ".records += [$RECORD]" database/uploads.json > database/uploads.json.tmp
+                  mv database/uploads.json.tmp database/uploads.json
+                  
+                  # Step 3: Delete local files
+                  echo "Deleting local files..."
+                  rm -f "$TS_FILE" "$MP4_FILE"
+                  echo "✓ Local files deleted"
+                else
+                  echo "✗ Upload failed: Invalid response"
+                  echo "Response: $RESPONSE_BODY"
+                fi
+              else
+                echo "✗ Upload failed with HTTP $HTTP_CODE"
+                echo "Response: $RESPONSE_BODY"
+              fi
+            else
+              echo "✗ Conversion failed"
+            fi
+          done
+          
+          echo ""
+          echo "=== Processing Complete ==="
+          if [ -f database/uploads.json ]; then
+            echo "Total uploads: $(jq '.records | length' database/uploads.json)"
+          fi
+      
+      - name: Save database
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: database/
+          key: state-${{ matrix.channel.username }}-${{ github.run_id }}-processed
+      
+      - name: Upload database artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: processed-db-${{ matrix.channel.username }}-${{ github.run_number }}
+          path: database/
+          retention-days: 30
+          if-no-files-found: ignore
+
   # Auto-restart for 24/7
   restart:
     if: "!startsWith(github.ref, 'refs/tags/') && (success() || failure()) && needs.setup.outputs.has-channels == 'true'"
-    needs: [setup, record]
+    needs: [setup, record, process]
     runs-on: ubuntu-latest
     steps:
       - name: Wait before restart

@@ -203,9 +203,22 @@ jobs:
               echo "This is normal - streamer may be offline or timeout reached"
               exit 0
             }
-              echo "This is normal - streamer may be offline or timeout reached"
-              exit 0
-            }
+          
+          # Show upload summary
+          echo "=== Upload Summary ==="
+          if [ -f database/uploads.json ]; then
+            echo "Database file exists, size: $(wc -c < database/uploads.json) bytes"
+            echo "Number of records: $(jq '.records | length' database/uploads.json 2>/dev/null || echo '0')"
+            echo "Recent uploads:"
+            jq -r '.records[-5:] | .[] | "\(.uploaded_at) - \(.filename) - \(.status) - \(.gofile_link)"' database/uploads.json 2>/dev/null || echo "No records found"
+          else
+            echo "No database file found"
+          fi
+          
+          echo ""
+          echo "=== Local Video Files ==="
+          find videos -type f \( -name "*.ts" -o -name "*.mp4" \) -exec ls -lh {} \; 2>/dev/null || echo "No video files found"
+          echo "======================"
       
       - uses: actions/cache/save@v4
         if: always()

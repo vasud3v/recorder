@@ -314,9 +314,7 @@ func (ch *Channel) finalizeRecording(filename string) {
 		ch.Info("uploading `%s` to GoFile...", filepath.Base(finalPath))
 		
 		gofileUploader := uploader.NewGoFileUploader()
-		uploadStart := time.Now()
 		downloadLink, err := gofileUploader.Upload(finalPath)
-		uploadDuration := time.Since(uploadStart).Seconds()
 		
 		if err != nil {
 			ch.Error("gofile upload failed for `%s`: %s", finalPath, err.Error())
@@ -393,9 +391,7 @@ func (ch *Channel) finalizeRecordingAsync(filename string) {
 		ch.Info("uploading `%s` to GoFile...", filepath.Base(finalPath))
 		
 		gofileUploader := uploader.NewGoFileUploader()
-		uploadStart := time.Now()
 		downloadLink, err := gofileUploader.Upload(finalPath)
-		uploadDuration := time.Since(uploadStart).Seconds()
 		
 		if err != nil {
 			ch.Error("gofile upload failed for `%s`: %s", finalPath, err.Error())

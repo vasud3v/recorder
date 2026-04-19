@@ -13,6 +13,13 @@ import (
 	"github.com/HeapOfChaos/goondvr/server"
 )
 
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // PostChaturbateAPI makes a POST request to Chaturbate API
 func PostChaturbateAPI(ctx context.Context, username, csrfToken string) (string, error) {
 	apiURL := fmt.Sprintf("%sget_edge_hls_url_ajax/", server.Config.Domain)
@@ -77,15 +84,15 @@ func PostChaturbateAPI(ctx context.Context, username, csrfToken string) (string,
 	}
 	defer resp.Body.Close()
 	
+	if server.Config.Debug {
+		fmt.Printf("[DEBUG] POST API status: %d for %s\n", resp.StatusCode, apiURL)
+	}
+	
 	if resp.StatusCode == 404 {
 		return "", ErrNotFound
 	}
 	
-	if resp.StatusCode == 403 {
-		return "", ErrPrivateStream
-	}
-	
-	// Read response
+	// Read response body first to check for Cloudflare
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("read body: %w", err)
@@ -93,9 +100,21 @@ func PostChaturbateAPI(ctx context.Context, username, csrfToken string) (string,
 	
 	bodyStr := string(body)
 	
-	// Check for Cloudflare
-	if strings.Contains(bodyStr, "<title>Just a moment...</title>") {
+	// Check for Cloudflare block
+	if strings.Contains(bodyStr, "<title>Just a moment...</title>") || 
+	   strings.Contains(bodyStr, "Checking your browser") ||
+	   strings.Contains(bodyStr, "cloudflare") && resp.StatusCode == 403 {
+		if server.Config.Debug {
+			fmt.Printf("[DEBUG] Cloudflare block detected on POST API\n")
+		}
 		return "", ErrCloudflareBlocked
+	}
+	
+	if resp.StatusCode == 403 {
+		if server.Config.Debug {
+			fmt.Printf("[DEBUG] 403 response (not Cloudflare): %s\n", bodyStr[:min(200, len(bodyStr))])
+		}
+		return "", ErrPrivateStream
 	}
 	
 	return bodyStr, nil

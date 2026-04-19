@@ -71,13 +71,15 @@ func ScrapeChaturbateStream(ctx context.Context, username string) (string, strin
 			return hlsURL, "public", nil
 		}
 		
-		// Check if offline
-		if strings.Contains(body, "offline") || strings.Contains(body, "is not currently broadcasting") {
+		// Extract room status from JSON or strict HTML markers
+		statusRegex := regexp.MustCompile(`"room_status":\s*"([^"]+)"`)
+		if m := statusRegex.FindStringSubmatch(body); len(m) > 1 && (m[1] == "offline" || m[1] == "private" || m[1] == "hidden") {
+			return "", m[1], nil
+		}
+		if strings.Contains(body, "is not currently broadcasting") || strings.Contains(body, "room is currently offline") {
 			return "", "offline", nil
 		}
-		
-		// Check if private
-		if strings.Contains(body, "private") || strings.Contains(body, "Private Show") {
+		if strings.Contains(body, "in a Private Show") || strings.Contains(body, "currently in a private room") {
 			return "", "private", nil
 		}
 		
@@ -159,12 +161,15 @@ func ScrapeChaturbateStreamWithFlareSolverr(ctx context.Context, username string
 		}
 	}
 	
-	// Check room status
-	if strings.Contains(body, "offline") || strings.Contains(body, "is not currently broadcasting") {
+	// Extract room status from JSON or strict HTML markers
+	statusRegex := regexp.MustCompile(`"room_status":\s*"([^"]+)"`)
+	if m := statusRegex.FindStringSubmatch(body); len(m) > 1 && (m[1] == "offline" || m[1] == "private" || m[1] == "hidden") {
+		return "", m[1], nil
+	}
+	if strings.Contains(body, "is not currently broadcasting") || strings.Contains(body, "room is currently offline") {
 		return "", "offline", nil
 	}
-	
-	if strings.Contains(body, "private") || strings.Contains(body, "Private Show") {
+	if strings.Contains(body, "in a Private Show") || strings.Contains(body, "currently in a private room") {
 		return "", "private", nil
 	}
 	

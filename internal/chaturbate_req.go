@@ -108,20 +108,14 @@ func PostChaturbateAPI(ctx context.Context, username, csrfToken string) (string,
 	bodyStr := string(body)
 	
 	// Check for Cloudflare block
-	if strings.Contains(bodyStr, "<title>Just a moment...</title>") || 
+	if resp.StatusCode == 403 || 
+	   strings.Contains(bodyStr, "<title>Just a moment...</title>") || 
 	   strings.Contains(bodyStr, "Checking your browser") ||
-	   strings.Contains(bodyStr, "cloudflare") && resp.StatusCode == 403 {
+	   strings.Contains(bodyStr, "cloudflare") {
 		if server.Config.Debug {
-			fmt.Printf("[DEBUG] Cloudflare block detected on POST API\n")
+			fmt.Printf("[DEBUG] Cloudflare block detected on POST API (status: %d)\n", resp.StatusCode)
 		}
 		return "", ErrCloudflareBlocked
-	}
-	
-	if resp.StatusCode == 403 {
-		if server.Config.Debug {
-			fmt.Printf("[DEBUG] 403 response (not Cloudflare): %s\n", bodyStr[:min(200, len(bodyStr))])
-		}
-		return "", ErrPrivateStream
 	}
 	
 	return bodyStr, nil

@@ -375,14 +375,18 @@ jobs:
             ATTEMPT=$(( ATTEMPT + 1 ))
             echo "::group::Attempt #$ATTEMPT ($(date '+%H:%M:%S'))"
 
+            VCOUNT_BEFORE=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l)
+            VSIZE_BEFORE=$(du -sb videos 2>/dev/null | cut -f1 || echo 0)
+
             RC=0
             timeout --kill-after=60 $(( MAX_DURATION + 2 ))m \
               ./goondvr "${ARGS[@]}" || RC=$?
 
             VCOUNT=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l)
+            VSIZE=$(du -sb videos 2>/dev/null | cut -f1 || echo 0)
 
-            # First video appeared → stream is/was live
-            if [[ "$VCOUNT" -gt 0 ]]; then
+            # File appeared or grew → stream is/was live
+            if [[ "$VCOUNT" -gt "$VCOUNT_BEFORE" ]] || [[ "$VSIZE" -gt "$VSIZE_BEFORE" ]]; then
               RECORDED=true
               ATTEMPT=0          # reset: treat it as "fresh" now
               OFFLINE_COUNT=0
@@ -395,12 +399,11 @@ jobs:
               break
             fi
 
-            # Chunk timed out (RC=124) → stream still live, keep looping
+            # Chunk timed out (RC=124) → stream still live, break to process and restart
             if [[ "$RC" -eq 124 ]]; then
-              echo "⏱️ Chunk complete — starting next chunk"
-              OFFLINE_COUNT=0
+              echo "⏱️ Chunk complete — moving to upload (workflow will restart)"
               echo "::endgroup::"
-              continue
+              break
             fi
 
             # goondvr exited early

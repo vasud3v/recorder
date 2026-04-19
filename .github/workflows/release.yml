@@ -203,16 +203,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 330  # 5.5 h hard cap — leaves 30 min for upload+cleanup
 
-    # FlareSolverr is required by goondvr as a Cloudflare 403 bypass fallback.
-    # The Go code automatically falls back to it when direct HTTP gets blocked.
-    services:
-      flaresolverr:
-        image: ghcr.io/flaresolverr/flaresolverr:latest
-        ports: ["8191:8191"]
-        env:
-          LOG_LEVEL: info
-          CAPTCHA_SOLVER: none
-
     strategy:
       matrix:
         channel: ${{ fromJson(needs.setup.outputs.channels) }}
@@ -236,6 +226,18 @@ jobs:
           go mod download
           go build -ldflags="-s -w" -o goondvr .
           echo "✓ Built: $(./goondvr --version 2>&1 || echo 'ok')"
+
+      - name: Start FlareSolverr
+        run: |
+          docker run -d \
+            --name flaresolverr \
+            -p 8191:8191 \
+            -e LOG_LEVEL=info \
+            -e CAPTCHA_SOLVER=none \
+            ghcr.io/flaresolverr/flaresolverr:latest
+            
+          # Print the logs in the background so they appear in GitHub Actions output
+          docker logs -f flaresolverr &
 
       - name: Wait for FlareSolverr
         run: |

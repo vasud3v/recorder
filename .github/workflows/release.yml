@@ -331,25 +331,38 @@ jobs:
           RECORDED=false
           OFFLINE_COUNT=0
           ATTEMPT=0
-          REC_TIMEOUT=$MAX_DURATION
-
-          # Thresholds depend on chunk duration
+          
+          # Separate timeouts: initial connection vs recording chunks
           if [ "$MAX_DURATION" -le 5 ]; then
+            INITIAL_TIMEOUT=10  # 10 minutes for initial FlareSolverr connection
+            REC_TIMEOUT=$MAX_DURATION  # Use actual duration for video chunks
             MAX_OFFLINE=2
             MAX_ATTEMPTS=10
           else
+            INITIAL_TIMEOUT=$MAX_DURATION  # For longer chunks, use same timeout
+            REC_TIMEOUT=$MAX_DURATION  # Use actual duration for video chunks
             MAX_OFFLINE=5
             MAX_ATTEMPTS=30
           fi
 
-          echo "Timeout: ${REC_TIMEOUT}min per attempt | Max offline: $MAX_OFFLINE | Max attempts: $MAX_ATTEMPTS"
+          echo "Initial connection timeout: ${INITIAL_TIMEOUT}min | Video chunk length: ${REC_TIMEOUT}min | Max offline: $MAX_OFFLINE | Max attempts: $MAX_ATTEMPTS"
 
           while true; do
             ATTEMPT=$((ATTEMPT + 1))
             echo ""
             echo "═══ Attempt #$ATTEMPT  $(date '+%Y-%m-%d %H:%M:%S') ═══"
 
-            timeout --kill-after=30 ${REC_TIMEOUT}m ./goondvr \
+            # Use longer timeout for first connection attempt (FlareSolverr needs time)
+            if [ "$ATTEMPT" -eq 1 ] && [ "$RECORDED" = "false" ]; then
+              CURRENT_TIMEOUT=$INITIAL_TIMEOUT
+              echo "🔄 First connection attempt - allowing ${CURRENT_TIMEOUT}min for FlareSolverr to bypass Cloudflare"
+            else
+              CURRENT_TIMEOUT=$REC_TIMEOUT
+              echo "📹 Recording ${CURRENT_TIMEOUT}-minute video chunk"
+            fi
+            fi
+
+            timeout --kill-after=30 ${CURRENT_TIMEOUT}m ./goondvr \
               -u "${{ matrix.channel.username }}" \
               --site "${{ matrix.channel.site }}" \
               --cookies "$CLEAN_COOKIES" \
@@ -369,6 +382,7 @@ jobs:
             if [ "$VCOUNT" -gt 0 ]; then
               RECORDED=true
               ATTEMPT=0  # Reset attempt counter after successful recording
+              echo "✅ Connection established - now recording ${REC_TIMEOUT}-minute video chunks"
             fi
 
             # Timeout (124) = stream was/is live, loop for next chunk

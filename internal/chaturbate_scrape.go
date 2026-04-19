@@ -178,7 +178,7 @@ func GetFlareSolverrResponse(ctx context.Context, url string) (*FlareSolverrResp
 	reqBody := FlareSolverrRequest{
 		Cmd:        "request.get",
 		URL:        url,
-		MaxTimeout: 90000, // 90 seconds for Cloudflare challenges
+		MaxTimeout: 180000, // 180 seconds for Cloudflare challenges
 	}
 	
 	jsonData, err := json.Marshal(reqBody)

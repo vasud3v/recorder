@@ -107,12 +107,16 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 			var hlsURL, status string
 			var scrapeErr error
 			
-			for attempt := 1; attempt <= 3; attempt++ {
+			for attempt := 1; attempt <= 5; attempt++ {
 				if server.Config.Debug {
-					fmt.Printf("[DEBUG] FlareSolverr attempt %d/3...\n", attempt)
+					fmt.Printf("[DEBUG] FlareSolverr attempt %d/5...\n", attempt)
 				}
 				
-				hlsURL, status, scrapeErr = internal.ScrapeChaturbateStreamWithFlareSolverr(ctx, username)
+				// Create a context with longer timeout for FlareSolverr (independent of recording duration)
+				attemptCtx, cancel := context.WithTimeout(ctx, 300*time.Second)
+				hlsURL, status, scrapeErr = internal.ScrapeChaturbateStreamWithFlareSolverr(attemptCtx, username)
+				cancel()
+				
 				if scrapeErr == nil {
 					break
 				}
@@ -121,13 +125,21 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 					fmt.Printf("[DEBUG] FlareSolverr attempt %d failed: %v\n", attempt, scrapeErr)
 				}
 				
-				// Longer delay between retries to avoid FlareSolverr congestion
-				if attempt < 3 {
-					delay := time.Duration(10+attempt*10) * time.Second
+				// Exponential backoff with jitter to avoid FlareSolverr congestion
+				if attempt < 5 {
+					baseDelay := time.Duration(15+attempt*15) * time.Second
+					jitter := time.Duration(attempt*5) * time.Second
+					delay := baseDelay + jitter
 					if server.Config.Debug {
 						fmt.Printf("[DEBUG] Waiting %v before retry...\n", delay)
 					}
-					time.Sleep(delay)
+					
+					// Check if context is cancelled during wait
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-time.After(delay):
+					}
 				}
 			}
 			

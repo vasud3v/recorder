@@ -41,6 +41,10 @@ func PostChaturbateAPI(ctx context.Context, username, csrfToken string) (string,
 	}
 	
 	req.Header.Set("User-Agent", strings.TrimSpace(userAgent))
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	req.Header.Set("DNT", "1")
+
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")

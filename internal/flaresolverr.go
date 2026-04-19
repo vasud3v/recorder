@@ -52,7 +52,7 @@ func GetFreshCookies(ctx context.Context, url string) (string, string, error) {
 	reqBody := FlareSolverrRequest{
 		Cmd:        "request.get",
 		URL:        url,
-		MaxTimeout: 90000, // 90 seconds for Cloudflare challenges
+		MaxTimeout: 180000, // 180 seconds for Cloudflare challenges
 	}
 
 	jsonData, err := json.Marshal(reqBody)
@@ -71,7 +71,7 @@ func GetFreshCookies(ctx context.Context, url string) (string, string, error) {
 
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 180 * time.Second} // 3 minutes for Cloudflare challenges + queue wait
+	client := &http.Client{Timeout: 360 * time.Second} // 6 minutes for Cloudflare challenges + queue wait
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", fmt.Errorf("do request: %w", err)

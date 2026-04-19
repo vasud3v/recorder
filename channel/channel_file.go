@@ -313,7 +313,6 @@ func (ch *Channel) finalizeRecording(filename string) {
 	// Upload to GoFile if enabled
 	if server.Config.EnableGoFileUpload {
 		ch.Info("uploading `%s` to GoFile...", filepath.Base(finalPath))
-		ch.Info("database location: %s", dbFile)
 		
 		gofileUploader := uploader.NewGoFileUploader()
 		uploadStart := time.Now()

@@ -3,6 +3,11 @@ name: GoondVR
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# Prevent multiple workflows from running simultaneously
+concurrency:
+  group: goondvr-recording
+  cancel-in-progress: false  # Don't cancel running workflows, just queue new ones
+
 on:
   push:
     tags:
@@ -632,9 +637,10 @@ jobs:
           compression-level: 9
 
   # Dedicated job for processing: convert, upload, delete
+  # Runs independently - doesn't wait for record job to complete
   process:
-    if: "!startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true' && always()"
-    needs: [setup, record]
+    if: "!startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true'"
+    needs: [setup]
     runs-on: ubuntu-latest
     timeout-minutes: 720  # 12 hours - allows processing of up to 50 large files
     strategy:
@@ -689,27 +695,48 @@ jobs:
           mkdir -p database/backups processed
           
           echo "=== Processing Job Started ==="
+          echo "This job will run continuously for up to 12 hours, processing files as they become available"
           
-          # Check available disk space
-          AVAILABLE_GB=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
-          echo "Available disk space: ${AVAILABLE_GB}GB"
+          # Track start time for timeout
+          JOB_START=$(date +%s)
+          MAX_JOB_TIME=$((11 * 3600))  # 11 hours (leave 1 hour buffer before job timeout)
+          ITERATION=0
           
-          if [ "$AVAILABLE_GB" -lt 2 ]; then
-            echo "⚠️  WARNING: Low disk space for processing (${AVAILABLE_GB}GB)"
-          fi
-          
-          echo "Looking for completed video files to process..."
-          
-          # Find all video files that have .uploaded marker (limit based on max_duration)
-          # Fewer files for large chunks to stay within timeout
-          MAX_FILES=50
-          MAX_DURATION="${{ inputs.max_duration || '45' }}"
-          if [ "$MAX_DURATION" -gt 120 ]; then
-            MAX_FILES=25
-            echo "Large chunk size detected - limiting to 25 files per run"
-          fi
-          
-          COMPLETED_FILES=$(find videos -type f -name "*.uploaded" 2>/dev/null | sort | head -$MAX_FILES || true)
+          # Continuous processing loop
+          while true; do
+            ITERATION=$((ITERATION + 1))
+            CURRENT_TIME=$(date +%s)
+            ELAPSED=$((CURRENT_TIME - JOB_START))
+            
+            # Check if we're approaching job timeout
+            if [ $ELAPSED -gt $MAX_JOB_TIME ]; then
+              echo "⏱️  Job time limit approaching (11 hours) - stopping gracefully"
+              break
+            fi
+            
+            echo ""
+            echo "=== Processing Iteration #$ITERATION ($(date)) ==="
+            
+            # Check available disk space
+            AVAILABLE_GB=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
+            echo "Available disk space: ${AVAILABLE_GB}GB"
+            
+            if [ "$AVAILABLE_GB" -lt 2 ]; then
+              echo "⚠️  WARNING: Low disk space for processing (${AVAILABLE_GB}GB)"
+            fi
+            
+            echo "Looking for completed video files to process..."
+            
+            # Find all video files that have .uploaded marker (limit based on max_duration)
+            # Fewer files for large chunks to stay within timeout
+            MAX_FILES=50
+            MAX_DURATION="${{ inputs.max_duration || '45' }}"
+            if [ "$MAX_DURATION" -gt 120 ]; then
+              MAX_FILES=25
+              echo "Large chunk size detected - limiting to 25 files per run"
+            fi
+            
+            COMPLETED_FILES=$(find videos -type f -name "*.uploaded" 2>/dev/null | sort | head -$MAX_FILES || true)
           
           if [ -z "$COMPLETED_FILES" ]; then
             echo "No completed files found to process"
@@ -1039,6 +1066,22 @@ jobs:
           fi
           
           echo "============================"
+          
+          # If no files were processed, wait before next iteration
+          if [ "$PROCESSED_COUNT" -eq 0 ]; then
+            echo "No files processed this iteration - waiting 2 minutes before next check..."
+            sleep 120
+          else
+            echo "Processed $PROCESSED_COUNT file(s) - checking for more immediately..."
+            sleep 5
+          fi
+          
+          done  # End of continuous processing loop
+          
+          echo ""
+          echo "=== Processing Job Completed ==="
+          echo "Total iterations: $ITERATION"
+          echo "Job ran for $(($ELAPSED / 3600)) hours $(($ELAPSED % 3600 / 60)) minutes"
       
       - name: Save database
         uses: actions/cache/save@v4
@@ -1056,9 +1099,9 @@ jobs:
           retention-days: 30
           if-no-files-found: ignore
 
-  # Auto-restart for 24/7
+  # Auto-restart for 24/7 - only restarts after BOTH jobs complete
   restart:
-    if: "!startsWith(github.ref, 'refs/tags/') && (success() || failure()) && needs.setup.outputs.has-channels == 'true'"
+    if: "!startsWith(github.ref, 'refs/tags/') && needs.setup.outputs.has-channels == 'true'"
     needs: [setup, record, process]
     runs-on: ubuntu-latest
     steps:

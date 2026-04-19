@@ -361,9 +361,8 @@ jobs:
               --max-filesize 0 \
               --completed-dir videos/completed \
               --finalize-mode none \
-              $DEBUG_FLAG
-
-            RC=$?
+              $DEBUG_FLAG || RC=$?
+            RC=${RC:-0}
 
             # Count video files
             VCOUNT=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l)

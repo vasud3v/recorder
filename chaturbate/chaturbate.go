@@ -97,37 +97,43 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 	// Use the correct POST API
 	body, err := internal.PostChaturbateAPI(ctx, username, csrfToken)
 	if err != nil {
-		// If Cloudflare blocked us, try to get fresh cookies via FlareSolverr
+		// If Cloudflare blocked us, try scraping with FlareSolverr
 		if errors.Is(err, internal.ErrCloudflareBlocked) {
 			if server.Config.Debug {
-				fmt.Printf("[DEBUG] Cloudflare block detected, trying FlareSolverr...\n")
+				fmt.Printf("[DEBUG] Cloudflare block detected, trying FlareSolverr scraping...\n")
 			}
 			
-			// Get fresh cookies from FlareSolverr
-			cookies, userAgent, fsErr := internal.GetFreshCookies(ctx, fmt.Sprintf("%s%s/", server.Config.Domain, username))
-			if fsErr != nil {
+			// Try scraping the public page
+			hlsURL, status, scrapeErr := internal.ScrapeChaturbateStreamWithFlareSolverr(ctx, username)
+			if scrapeErr != nil {
 				if server.Config.Debug {
-					fmt.Printf("[DEBUG] FlareSolverr failed: %v\n", fsErr)
+					fmt.Printf("[DEBUG] FlareSolverr scraping failed: %v\n", scrapeErr)
 				}
 				return nil, fmt.Errorf("failed to get stream info: %w", err)
 			}
 			
-			// Update config with fresh cookies
-			server.Config.Cookies = cookies
-			server.Config.UserAgent = userAgent
+			meta := &Stream{}
 			
+			if status == "offline" {
+				return meta, internal.ErrChannelOffline
+			}
+			
+			if status == "private" {
+				return meta, internal.ErrPrivateStream
+			}
+			
+			if hlsURL == "" {
+				return meta, internal.ErrChannelOffline
+			}
+			
+			meta.HLSSource = hlsURL
 			if server.Config.Debug {
-				fmt.Printf("[DEBUG] Got fresh cookies, retrying API call...\n")
+				fmt.Printf("[DEBUG] Successfully scraped HLS URL: %s\n", hlsURL)
 			}
-			
-			// Retry with fresh cookies
-			body, err = internal.PostChaturbateAPI(ctx, username, csrfToken)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get stream info after FlareSolverr: %w", err)
-			}
-		} else {
-			return nil, fmt.Errorf("failed to get stream info: %w", err)
+			return meta, nil
 		}
+		
+		return nil, fmt.Errorf("failed to get stream info: %w", err)
 	}
 	
 	if server.Config.Debug {

@@ -24,17 +24,18 @@ type FlareSolverrResponse struct {
 	Status   string `json:"status"`
 	Message  string `json:"message"`
 	Solution struct {
-		URL     string `json:"url"`
-		Status  int    `json:"status"`
+		URL      string `json:"url"`
+		Status   int    `json:"status"`
+		Response string `json:"response"` // HTML content
 		Cookies []struct {
-			Name   string  `json:"name"`
-			Value  string  `json:"value"`
-			Domain string  `json:"domain"`
-			Path   string  `json:"path"`
-			Expires float64 `json:"expires"`
-			Size    int     `json:"size"`
-			HttpOnly bool   `json:"httpOnly"`
-			Secure   bool   `json:"secure"`
+			Name     string  `json:"name"`
+			Value    string  `json:"value"`
+			Domain   string  `json:"domain"`
+			Path     string  `json:"path"`
+			Expires  float64 `json:"expires"`
+			Size     int     `json:"size"`
+			HttpOnly bool    `json:"httpOnly"`
+			Secure   bool    `json:"secure"`
 			SameSite string  `json:"sameSite"`
 		} `json:"cookies"`
 		UserAgent string `json:"userAgent"`

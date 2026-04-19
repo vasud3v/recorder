@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"math/rand"
 
 	"github.com/HeapOfChaos/goondvr/server"
 )
@@ -261,6 +262,19 @@ func (h *Req) DoRequest(req *http.Request) (string, error) {
 	return string(b), nil
 }
 
+// getRandomUserAgent returns a random user agent to avoid detection
+func getRandomUserAgent() string {
+	userAgents := []string{
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15",
+		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+	}
+	return userAgents[rand.Intn(len(userAgents))]
+}
+
 // SetRequestHeaders applies necessary headers to the request.
 func (h *Req) SetRequestHeaders(req *http.Request) {
 	if h.isMedia {
@@ -279,8 +293,8 @@ func (h *Req) SetRequestHeaders(req *http.Request) {
 	// Set comprehensive browser-like headers to avoid detection
 	userAgent := server.Config.UserAgent
 	if userAgent == "" {
-		// Use a more recent and common user agent
-		userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+		// Use a random user agent to avoid detection patterns
+		userAgent = getRandomUserAgent()
 	}
 	// Clean the user agent string to remove any invalid characters
 	userAgent = strings.TrimSpace(strings.ReplaceAll(userAgent, "\n", ""))

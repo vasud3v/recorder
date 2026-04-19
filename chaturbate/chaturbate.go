@@ -103,7 +103,7 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 				fmt.Printf("[DEBUG] Cloudflare block detected, trying FlareSolverr scraping...\n")
 			}
 			
-			// Try scraping the public page with retries
+			// Try scraping the public page with retries and different strategies
 			var hlsURL, status string
 			var scrapeErr error
 			
@@ -114,7 +114,18 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 				
 				// Create a context with longer timeout for FlareSolverr (independent of recording duration)
 				attemptCtx, cancel := context.WithTimeout(ctx, 300*time.Second)
-				hlsURL, status, scrapeErr = internal.ScrapeChaturbateStreamWithFlareSolverr(attemptCtx, username)
+				
+				// Try different approaches based on attempt number
+				if attempt <= 3 {
+					// First 3 attempts: Use FlareSolverr with sessions
+					hlsURL, status, scrapeErr = internal.ScrapeChaturbateStreamWithFlareSolverr(attemptCtx, username)
+				} else {
+					// Last 2 attempts: Try direct scraping (might work if CF protection is lighter)
+					if server.Config.Debug {
+						fmt.Printf("[DEBUG] Switching to direct scraping for attempt %d\n", attempt)
+					}
+					hlsURL, status, scrapeErr = internal.ScrapeChaturbateStream(attemptCtx, username)
+				}
 				cancel()
 				
 				if scrapeErr == nil {
@@ -131,7 +142,12 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 					jitter := time.Duration(attempt*5) * time.Second
 					delay := baseDelay + jitter
 					if server.Config.Debug {
-						fmt.Printf("[DEBUG] Waiting %v before retry...\n", delay)
+						nextMethod := "FlareSolverr"
+						if attempt >= 3 {
+							nextMethod = "direct scraping"
+						}
+						fmt.Printf("[DEBUG] Waiting %v before retry (attempt %d will use %s)...\n", 
+							delay, attempt+1, nextMethod)
 					}
 					
 					// Check if context is cancelled during wait

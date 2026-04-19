@@ -409,7 +409,40 @@ jobs:
               fi
             else
               if [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]; then
-                echo "⏸️  Never came online after $ATTEMPT attempts — stopping"
+                echo "⏸️  Never came online after $ATTEMPT attempts"
+                
+                # For connection failures, add extra retry with different approach
+                if [ "$VCOUNT" -eq 0 ]; then
+                  echo "🔄 Trying alternative connection method..."
+                  
+                  # Wait longer and try once more with different settings
+                  sleep 300  # 5 minutes
+                  
+                  # Try one final attempt with extended timeout
+                  echo "═══ Final Attempt (Extended Timeout) ═══"
+                  timeout --kill-after=60 20m ./goondvr \
+                    -u "${{ matrix.channel.username }}" \
+                    --site "${{ matrix.channel.site }}" \
+                    --cookies "$CLEAN_COOKIES" \
+                    --user-agent "$CLEAN_UA" \
+                    --resolution "$RESOLUTION" \
+                    --framerate "$FRAMERATE" \
+                    --interval "$INTERVAL" \
+                    --max-duration 0 \
+                    --max-filesize 0 \
+                    --completed-dir videos/completed \
+                    --finalize-mode none \
+                    $DEBUG_FLAG || RC=$?
+                  
+                  FINAL_VCOUNT=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l)
+                  if [ "$FINAL_VCOUNT" -gt 0 ]; then
+                    echo "✅ Final attempt succeeded!"
+                    RECORDED=true
+                    break
+                  fi
+                fi
+                
+                echo "❌ All connection attempts failed — stopping"
                 break
               fi
               echo "Waiting for stream ($ATTEMPT/$MAX_ATTEMPTS)..."

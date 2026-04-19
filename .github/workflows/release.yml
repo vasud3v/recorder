@@ -451,6 +451,16 @@ jobs:
           path: streak/
           key: streak-${{ matrix.channel.username }}-${{ matrix.channel.site }}-${{ github.run_id }}
 
+      - name: Upload offline streak
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: streak-${{ matrix.channel.username }}-${{ matrix.channel.site }}
+          path: streak/
+          retention-days: 1
+          if-no-files-found: ignore
+          compression-level: 0
+
       # Upload raw recordings as artifacts for the process job
       - name: Upload recordings
         if: always()
@@ -488,14 +498,7 @@ jobs:
           name: raw-videos-${{ matrix.channel.username }}-${{ matrix.channel.site }}
           path: videos/
 
-      - name: Restore upload database
-        uses: actions/cache/restore@v4
-        continue-on-error: true
-        with:
-          path: database/
-          key: uploads-db-${{ matrix.channel.username }}-${{ github.run_id }}
-          restore-keys: |
-            uploads-db-${{ matrix.channel.username }}-
+
 
       - name: Process and upload to GoFile
         if: steps.download.outcome == 'success'
@@ -660,46 +663,30 @@ jobs:
 
             # ── Step 3: Record in database ─────────────────────────
             DB_OK=false
-            (
-              flock -x -w 60 200 || exit 1
-              cp database/uploads.json database/uploads.json.bak 2>/dev/null || true
+            RECORD=$(jq -n \
+              --arg id "${{ matrix.channel.username }}_$(date +%s)_$$" \
+              --arg user "${{ matrix.channel.username }}" \
+              --arg site "${{ matrix.channel.site }}" \
+              --arg file "$BASENAME" \
+              --arg link "$DOWNLOAD_LINK" \
+              --arg time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --argjson size "$MP4_SIZE" \
+              --argjson dur "$UPLOAD_DURATION" \
+              --argjson speed "$UPLOAD_SPEED" \
+              --argjson conv "$CONVERT_DURATION" \
+              '{
+                id: $id, username: $user, site: $site,
+                filename: $file, gofile_link: $link,
+                uploaded_at: $time, filesize_bytes: $size,
+                upload_duration: $dur, upload_speed: $speed,
+                convert_duration: $conv, status: "uploaded"
+              }')
 
-              RECORD=$(jq -n \
-                --arg id "${{ matrix.channel.username }}_$(date +%s)_$$" \
-                --arg user "${{ matrix.channel.username }}" \
-                --arg site "${{ matrix.channel.site }}" \
-                --arg file "$BASENAME" \
-                --arg link "$DOWNLOAD_LINK" \
-                --arg time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                --argjson size "$MP4_SIZE" \
-                --argjson dur "$UPLOAD_DURATION" \
-                --argjson speed "$UPLOAD_SPEED" \
-                --argjson conv "$CONVERT_DURATION" \
-                '{
-                  id: $id, username: $user, site: $site,
-                  filename: $file, gofile_link: $link,
-                  uploaded_at: $time, filesize_bytes: $size,
-                  upload_duration: $dur, upload_speed: $speed,
-                  convert_duration: $conv, status: "uploaded"
-                }')
-
-              if jq ".records += [$RECORD]" database/uploads.json > database/uploads.json.tmp 2>/dev/null; then
-                mv database/uploads.json.tmp database/uploads.json
-                rm -f database/uploads.json.bak
-                echo "ok" > /tmp/db_result_$$
-              else
-                [ -f database/uploads.json.bak ] && mv database/uploads.json.bak database/uploads.json
-                rm -f database/uploads.json.tmp
-                echo "fail" > /tmp/db_result_$$
-              fi
-            ) 200>database/.lock
-
-            if [ "$(cat /tmp/db_result_$$ 2>/dev/null)" = "ok" ]; then
+            if jq ".records += [$RECORD]" database/uploads.json > database/uploads.json.tmp 2>/dev/null; then
+              mv database/uploads.json.tmp database/uploads.json
               DB_OK=true
-              rm -f /tmp/db_result_$$
               echo "  ✓ Database updated"
             else
-              rm -f /tmp/db_result_$$
               echo "  ⚠️  Database update failed — keeping files"
             fi
 
@@ -739,12 +726,7 @@ jobs:
           ELAPSED_M=$(( ( $(date +%s) - JOB_START ) / 60 ))
           echo "Job duration: ${ELAPSED_M} minutes"
 
-      - name: Save upload database
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: database/
-          key: uploads-db-${{ matrix.channel.username }}-${{ github.run_id }}-${{ github.run_attempt }}
+
 
       - name: Upload database artifact
         if: always()
@@ -805,32 +787,22 @@ jobs:
             echo "✓ Database successfully committed to the repository!"
           fi
 
-      # Restore all per-channel streak counters
-      - name: Restore offline streaks
-        uses: actions/cache/restore@v4
+      # Restore all per-channel streak counters from artifacts
+      - name: Download streak artifacts
+        uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          path: streak/
-          # Restore the latest streak for any channel in this run
-          key: streak-all-${{ github.run_id }}
-          restore-keys: |
-            streak-
+          pattern: streak-*
+          path: downloaded-streaks
+          merge-multiple: true
 
       - name: Evaluate restart
         id: eval
         run: |
-          RECORD="${{ needs.record.result }}"
-          PROCESS="${{ needs.process.result }}"
-          echo "Record: $RECORD | Process: $PROCESS"
-
-          # ── Hard stop: both jobs failed ────────────────────────────
-          FAILURES=0
-          [ "$RECORD" = "failure" ] && FAILURES=$((FAILURES + 1))
-          [ "$PROCESS" = "failure" ] && FAILURES=$((FAILURES + 1))
-
-          if [ "$FAILURES" -ge 2 ]; then
+          # ── Input check: Run Once ──────────────────────────────────
+          if [ "${{ inputs.run_once }}" = "true" ]; then
             echo "restart=false" >> $GITHUB_OUTPUT
-            echo "⚠️  Both jobs failed — skipping restart to prevent crash loop"
+            echo "🛑 Run Once enabled — stopping workflow"
             exit 0
           fi
 
@@ -846,7 +818,7 @@ jobs:
           CHANNELS_TOTAL=0
           CHANNELS_OVER_LIMIT=0
 
-          if [ -d streak ]; then
+          if [ -d downloaded-streaks ]; then
             while IFS= read -r STREAK_FILE; do
               STREAK=$(cat "$STREAK_FILE" 2>/dev/null | grep -oE '^[0-9]+' || echo "0")
               CHANNELS_TOTAL=$((CHANNELS_TOTAL + 1))
@@ -854,7 +826,7 @@ jobs:
               if [ "$STREAK" -ge "$MAX_OFFLINE_RUNS" ]; then
                 CHANNELS_OVER_LIMIT=$((CHANNELS_OVER_LIMIT + 1))
               fi
-            done < <(find streak -type f -name "*.txt" 2>/dev/null)
+            done < <(find downloaded-streaks -type f -name "*.txt" 2>/dev/null)
           fi
 
           echo "Channels total: $CHANNELS_TOTAL | Over limit: $CHANNELS_OVER_LIMIT"
@@ -913,7 +885,15 @@ jobs:
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   workflow_id: 'release.yml',
-                  ref: branch
+                  ref: branch,
+                  inputs: {
+                    max_duration: "${{ inputs.max_duration || '45' }}",
+                    resolution: "${{ inputs.resolution || '9999' }}",
+                    framerate: "${{ inputs.framerate || '60' }}",
+                    interval: "${{ inputs.interval || '1' }}",
+                    debug: "${{ inputs.debug }}",
+                    run_once: "false"
+                  }
                 });
                 console.log('✓ Restart triggered successfully');
                 return;

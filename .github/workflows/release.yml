@@ -347,6 +347,25 @@ jobs:
 
           echo "Initial connection timeout: ${INITIAL_TIMEOUT}min | Video chunk length: ${REC_TIMEOUT}min | Max offline: $MAX_OFFLINE | Max attempts: $MAX_ATTEMPTS"
 
+          # ── Run Once Monitor ───────────────────────────────────
+          # If run_once is enabled, start a background monitor that kills goondvr
+          # immediately after the first video file is created
+          if [ "${{ inputs.run_once }}" = "true" ]; then
+            (
+              echo "🔍 Run Once Monitor: Watching for first video file..."
+              while true; do
+                sleep 5
+                VCOUNT=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) 2>/dev/null | wc -l)
+                if [ "$VCOUNT" -ge 1 ]; then
+                  echo "🛑 Run Once Monitor: First video detected - stopping goondvr"
+                  pkill -f goondvr || true
+                  break
+                fi
+              done
+            ) &
+            RUN_ONCE_MONITOR_PID=$!
+          fi
+
           while true; do
             ATTEMPT=$((ATTEMPT + 1))
             echo ""
@@ -356,9 +375,10 @@ jobs:
             # BUT if run_once is enabled, limit to recording duration + connection buffer
             if [ "$ATTEMPT" -eq 1 ] && [ "$RECORDED" = "false" ]; then
               if [ "${{ inputs.run_once }}" = "true" ]; then
-                # For run_once: give 5 min for connection + 1 min recording = 6 min total
-                CURRENT_TIMEOUT=$((REC_TIMEOUT + 5))
-                echo "🔄 First attempt (run once) - ${CURRENT_TIMEOUT}min timeout (5min connection + ${REC_TIMEOUT}min recording)"
+                # For run_once: ONLY use the video duration timeout (no extra time)
+                # This ensures only 1 video file is created
+                CURRENT_TIMEOUT=$REC_TIMEOUT
+                echo "🔄 First attempt (run once) - ${CURRENT_TIMEOUT}min timeout (will create 1 video file)"
               else
                 CURRENT_TIMEOUT=$INITIAL_TIMEOUT
                 echo "🔄 First connection attempt - allowing ${CURRENT_TIMEOUT}min for FlareSolverr to bypass Cloudflare"
@@ -392,13 +412,17 @@ jobs:
             if [ "$VCOUNT" -gt 0 ]; then
               RECORDED=true
               ATTEMPT=0  # Reset attempt counter after successful recording
-              echo "✅ Connection established - now recording ${REC_TIMEOUT}-minute video chunks"
               
-              # If run_once is enabled, stop immediately after first successful recording
+              # If run_once is enabled, stop immediately after FIRST file is created
               if [ "${{ inputs.run_once }}" = "true" ]; then
-                echo "🛑 Run Once enabled - stopping after successful recording"
+                echo "✅ First video file created - stopping goondvr (run once mode)"
+                pkill -f goondvr || true
+                sleep 2
+                echo "🛑 Run Once enabled - stopping after creating 1 video file"
                 break
               fi
+              
+              echo "✅ Connection established - now recording ${REC_TIMEOUT}-minute video chunks"
             fi
 
             # Timeout (124) = stream was/is live, loop for next chunk
@@ -468,10 +492,17 @@ jobs:
             sleep $((INTERVAL * 60))
           done
 
-          # ── Stop monitor ───────────────────────────────────────────
+          # ── Stop monitors ──────────────────────────────────────────
+          # Stop disk monitor
           if kill -0 "$MONITOR_PID" 2>/dev/null; then
             kill -TERM "$MONITOR_PID" 2>/dev/null || true
             wait "$MONITOR_PID" 2>/dev/null || true
+          fi
+          
+          # Stop run_once monitor if it exists
+          if [ -n "${RUN_ONCE_MONITOR_PID:-}" ] && kill -0 "$RUN_ONCE_MONITOR_PID" 2>/dev/null; then
+            kill -TERM "$RUN_ONCE_MONITOR_PID" 2>/dev/null || true
+            wait "$RUN_ONCE_MONITOR_PID" 2>/dev/null || true
           fi
 
           # ── Final summary ──────────────────────────────────────────

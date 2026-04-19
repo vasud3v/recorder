@@ -890,12 +890,6 @@ jobs:
             echo "║  Recent uploads:"
             jq -r '.recordings[-5:] | .[] | "║    \(.filename) → \(.gofile_link)"' "$STREAMER_DATE_DB/recordings.json" 2>/dev/null || echo "║    (none)"
           fi
-            TOTAL_GB=$(awk "BEGIN {printf \"%.2f\", $TOTAL_BYTES / 1073741824}")
-            echo "║  Total DB records: $TOTAL  |  Total uploaded: ${TOTAL_GB}GB"
-            echo "╠══════════════════════════════════════════════════════╣"
-            echo "║  Recent uploads:"
-            jq -r '.records[-5:] | .[] | "║    \(.filename) → \(.gofile_link)"' "$STREAMER_DB/uploads.json" 2>/dev/null || echo "║    (none)"
-          fi
           echo "╚══════════════════════════════════════════════════════╝"
 
           ELAPSED_M=$(( ( $(date +%s) - JOB_START ) / 60 ))

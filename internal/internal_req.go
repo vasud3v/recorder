@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -61,15 +62,41 @@ func CreateTransport() *http.Transport {
 	newTransport := defaultTransport.Clone()
 	newTransport.TLSClientConfig = &tls.Config{
 		InsecureSkipVerify: true,
+		// Add more TLS settings to appear more like a real browser
+		MinVersion:         tls.VersionTLS12,
+		MaxVersion:         tls.VersionTLS13,
+		CipherSuites: []uint16{
+			tls.TLS_AES_128_GCM_SHA256,
+			tls.TLS_AES_256_GCM_SHA384,
+			tls.TLS_CHACHA20_POLY1305_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+		},
 	}
-	// Increase timeouts and connection limits for better reliability
-	newTransport.MaxIdleConns = 100
-	newTransport.MaxIdleConnsPerHost = 100
-	newTransport.IdleConnTimeout = 90 * time.Second
-	newTransport.TLSHandshakeTimeout = 10 * time.Second
+	// Optimize connection settings to avoid being detected as bot
+	newTransport.MaxIdleConns = 10
+	newTransport.MaxIdleConnsPerHost = 2
+	newTransport.IdleConnTimeout = 30 * time.Second
+	newTransport.TLSHandshakeTimeout = 15 * time.Second
 	newTransport.ExpectContinueTimeout = 1 * time.Second
-	newTransport.ResponseHeaderTimeout = 10 * time.Second
+	newTransport.ResponseHeaderTimeout = 15 * time.Second
 	newTransport.DisableKeepAlives = false
+	newTransport.DisableCompression = false // Let Go handle compression automatically
+	
+	// Support proxy from environment variables (HTTP_PROXY, HTTPS_PROXY)
+	// This allows using VPN or proxy services
+	if server.Config != nil && server.Config.Debug {
+		if proxy := newTransport.Proxy; proxy != nil {
+			req, _ := http.NewRequest("GET", "http://example.com", nil)
+			if proxyURL, _ := proxy(req); proxyURL != nil {
+				fmt.Printf("[DEBUG] Using proxy: %s\n", proxyURL.String())
+			}
+		}
+	}
 	
 	return newTransport
 }
@@ -105,7 +132,18 @@ func (h *Req) GetBytes(ctx context.Context, url string) ([]byte, error) {
 		return nil, ErrNotFound
 	}
 
-	b, err := io.ReadAll(resp.Body)
+	// Handle gzip compression
+	var reader io.Reader = resp.Body
+	if resp.Header.Get("Content-Encoding") == "gzip" {
+		gzReader, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("gzip reader: %w", err)
+		}
+		defer gzReader.Close()
+		reader = gzReader
+	}
+
+	b, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
@@ -138,13 +176,20 @@ func (h *Req) GetBytes(ctx context.Context, url string) ([]byte, error) {
 
 // CreateRequest constructs an HTTP GET request with necessary headers.
 func (h *Req) CreateRequest(ctx context.Context, url string) (*http.Request, context.CancelFunc, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second) // increased timeout to 30 seconds
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second) // increased timeout to 45 seconds
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, cancel, err
 	}
 	h.SetRequestHeaders(req)
+	
+	// Add small random delay to avoid being detected as bot
+	if !h.isMedia {
+		delay := time.Duration(500+time.Now().UnixNano()%1000) * time.Millisecond
+		time.Sleep(delay)
+	}
+	
 	return req, cancel, nil
 }
 
@@ -193,10 +238,12 @@ func (h *Req) SetRequestHeaders(req *http.Request) {
 		// Do NOT send it to CDN media hosts (mmcdn.com) as it may cause rejection.
 		req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	}
-	// Set User-Agent with default fallback
+	
+	// Set comprehensive browser-like headers to avoid detection
 	userAgent := server.Config.UserAgent
 	if userAgent == "" {
-		userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+		// Use a more recent and common user agent
+		userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 	}
 	// Clean the user agent string to remove any invalid characters
 	userAgent = strings.TrimSpace(strings.ReplaceAll(userAgent, "\n", ""))
@@ -204,6 +251,19 @@ func (h *Req) SetRequestHeaders(req *http.Request) {
 	if userAgent != "" {
 		req.Header.Set("User-Agent", userAgent)
 	}
+	
+	// Add more browser-like headers
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("Pragma", "no-cache")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Ch-Ua", `"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"`)
+	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
+	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+	
 	if server.Config.Cookies != "" {
 		cookies := ParseCookies(server.Config.Cookies)
 		for name, value := range cookies {

@@ -80,21 +80,28 @@ func (c *Client) GetStream(ctx context.Context, username string) (*Stream, error
 }
 
 type apiResponse struct {
-	RoomStatus       string `json:"room_status"`
-	HLSSource        string `json:"hls_source"`
-	Code             string `json:"code"`
-	RoomTitle        string `json:"room_title"`
-	Gender           string `json:"broadcaster_gender"`
-	NumViewers       int    `json:"num_viewers"`
-	EdgeRegion       string `json:"edge_region"`
+	URL          string `json:"url"`
+	RoomStatus   string `json:"room_status"`
+	Success      bool   `json:"success"`
+	RoomTitle    string `json:"room_title"`
+	Gender       string `json:"broadcaster_gender"`
+	NumViewers   int    `json:"num_viewers"`
+	EdgeRegion   string `json:"edge_region"`
 	SummaryCardImage string `json:"summary_card_image"`
 }
 
 func FetchStream(ctx context.Context, client *internal.Req, username string) (*Stream, error) {
-	apiURL := fmt.Sprintf("%sapi/chatvideocontext/%s/", server.Config.Domain, username)
-	body, err := client.Get(ctx, apiURL)
+	// Generate CSRF token
+	csrfToken := fmt.Sprintf("%032x", time.Now().UnixNano())
+	
+	// Use the correct POST API
+	body, err := internal.PostChaturbateAPI(ctx, username, csrfToken)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get stream info: %w", err)
+	}
+	
+	if server.Config.Debug {
+		fmt.Printf("[DEBUG] API response body (first 500 chars): %s\n", body[:min(500, len(body))])
 	}
 
 	var resp apiResponse
@@ -102,12 +109,8 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 		return nil, fmt.Errorf("failed to parse stream info: %w", err)
 	}
 
-	if resp.Code == "unauthorized" {
-		return nil, internal.ErrRoomPasswordRequired
-	}
-
 	if server.Config.Debug {
-		fmt.Printf("[DEBUG] API response for %s: room_status=%s hls_source=%v\n", username, resp.RoomStatus, resp.HLSSource != "")
+		fmt.Printf("[DEBUG] API response for %s: room_status=%s url=%v success=%v\n", username, resp.RoomStatus, resp.URL != "", resp.Success)
 	}
 
 	// Always populate static metadata so the caller can update it even when offline.
@@ -118,8 +121,8 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 		SummaryCardImage: resp.SummaryCardImage,
 	}
 
-	if resp.HLSSource != "" {
-		meta.HLSSource = resp.HLSSource
+	if resp.Success && resp.URL != "" {
+		meta.HLSSource = resp.URL
 		meta.NumViewers = resp.NumViewers
 		return meta, nil
 	}

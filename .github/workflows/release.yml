@@ -5,8 +5,8 @@ env:
 
 # Prevent multiple workflows from running simultaneously
 concurrency:
-  group: goondvr-recording
-  cancel-in-progress: false  # Don't cancel running workflows, just queue new ones
+  group: ${{ github.event_name == 'workflow_dispatch' && format('goondvr-manual-{0}', github.run_id) || 'goondvr-recording' }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}  # Cancel old manual runs, queue scheduled runs
 
 on:
   push:
@@ -388,6 +388,12 @@ jobs:
                   if [ "$SIZE1" = "$SIZE2" ] && [ "$SIZE1" -gt 0 ]; then
                     echo "Marking completed file for upload: $(basename "$VIDEO_FILE") (${SIZE1} bytes)"
                     touch "$MARKER"
+                    
+                    # Save to cache immediately so process job can access it
+                    # Use a unique key with timestamp to avoid conflicts
+                    CACHE_KEY="videos-${{ matrix.channel.username }}-${{ github.run_id }}-$(date +%s)"
+                    echo "Saving to cache: $CACHE_KEY"
+                    # Note: Can't call actions from within script, cache will be saved at end of job
                   fi
                 fi
               done
@@ -625,7 +631,7 @@ jobs:
             conf/
             database/
             videos/
-          key: state-${{ matrix.channel.username }}-resume-${{ github.run_id }}
+          key: videos-${{ matrix.channel.username }}-${{ github.run_id }}-${{ github.run_attempt }}
       
       - uses: actions/upload-artifact@v4
         if: always()
@@ -656,12 +662,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ffmpeg bc jq
       
       - name: Download raw recordings
-        uses: actions/download-artifact@v4
+        uses: actions/cache/restore@v4
         continue-on-error: true
         with:
-          pattern: raw-videos-${{ matrix.channel.username }}-${{ github.run_number }}*
           path: videos/
-          merge-multiple: true
+          key: videos-${{ matrix.channel.username }}-${{ github.run_id }}-never-match
+          restore-keys: |
+            videos-${{ matrix.channel.username }}-${{ github.run_id }}-
+            videos-${{ matrix.channel.username }}-resume-
       
       - name: Verify artifact structure
         run: |
@@ -703,6 +711,9 @@ jobs:
           ITERATION=0
           
           # Continuous processing loop
+          PROCESSED_COUNT=0
+          FAILED_COUNT=0
+          
           while true; do
             ITERATION=$((ITERATION + 1))
             CURRENT_TIME=$(date +%s)
@@ -756,20 +767,30 @@ jobs:
             else
               echo "Videos directory does not exist"
             fi
-            exit 0
-          fi
-          
-          FILE_COUNT=$(echo "$COMPLETED_FILES" | wc -l)
-          echo "Found $FILE_COUNT completed file(s) to process (max $MAX_FILES per run)"
-          
-          # Check if jq is available
-          if ! command -v jq &> /dev/null; then
-            echo "Error: jq is required but not installed"
-            exit 1
-          fi
-          
-          PROCESSED_COUNT=0
-          FAILED_COUNT=0
+            # Don't exit - continue loop to wait for files
+            PROCESSED_COUNT=0
+            FAILED_COUNT=0
+          else
+          else
+            
+            FILE_COUNT=$(echo "$COMPLETED_FILES" | wc -l)
+            echo "Found $FILE_COUNT completed file(s) to process (max $MAX_FILES per run)"
+            
+            # Check if jq is available
+            if ! command -v jq &> /dev/null; then
+              echo "Error: jq is required but not installed"
+              exit 1
+            fi
+            
+            # Check if bc is available
+            if ! command -v bc &> /dev/null; then
+              echo "Error: bc is required but not installed"
+              exit 1
+            fi
+            
+            # Reset counters for this iteration
+            ITERATION_PROCESSED=0
+            ITERATION_FAILED=0
           
           # Process each completed file
           for MARKER in $COMPLETED_FILES; do
@@ -805,6 +826,14 @@ jobs:
               continue
             fi
             
+            # For conversion, we need 2x the source file size
+            # Check if we have enough space
+            REQUIRED_GB=$(echo "scale=0; ($VIDEO_SIZE_BYTES * 2) / 1024 / 1024 / 1024 + 1" | bc 2>/dev/null || echo "2")
+            if [ "$AVAILABLE_GB" -lt "$REQUIRED_GB" ]; then
+              echo "⚠️  Skipping: Need ${REQUIRED_GB}GB for conversion, only have ${AVAILABLE_GB}GB"
+              continue
+            fi
+            
             VIDEO_SIZE=$(du -h "$VIDEO_FILE" | cut -f1)
             echo "Input: $VIDEO_FILE ($VIDEO_SIZE)"
             
@@ -834,6 +863,7 @@ jobs:
                 echo "✓ Conversion successful: $MP4_FILE ($MP4_SIZE) in ${CONVERT_DURATION}s"
               else
                 echo "✗ Conversion failed or timed out"
+                ITERATION_FAILED=$((ITERATION_FAILED + 1))
                 FAILED_COUNT=$((FAILED_COUNT + 1))
                 # Remove marker so it can be retried
                 rm -f "$MARKER"
@@ -842,22 +872,24 @@ jobs:
             fi
             
             # Verify MP4 was created successfully
-              if [ ! -f "$MP4_FILE" ]; then
-                echo "✗ MP4 file not created"
-                FAILED_COUNT=$((FAILED_COUNT + 1))
-                rm -f "$MARKER"
-                continue
-              fi
-              
-              # Check MP4 file size before upload
-              MP4_SIZE_BYTES=$(stat -c%s "$MP4_FILE" 2>/dev/null || echo "0")
-              
-              if [ "$MP4_SIZE_BYTES" -lt 1024 ]; then
-                echo "✗ MP4 file is empty or corrupted"
-                rm -f "$MP4_FILE" "$MARKER"
-                FAILED_COUNT=$((FAILED_COUNT + 1))
-                continue
-              fi
+            if [ ! -f "$MP4_FILE" ]; then
+              echo "✗ MP4 file not created"
+              ITERATION_FAILED=$((ITERATION_FAILED + 1))
+              FAILED_COUNT=$((FAILED_COUNT + 1))
+              rm -f "$MARKER"
+              continue
+            fi
+            
+            # Check MP4 file size before upload
+            MP4_SIZE_BYTES=$(stat -c%s "$MP4_FILE" 2>/dev/null || echo "0")
+            
+            if [ "$MP4_SIZE_BYTES" -lt 10240 ]; then
+              echo "✗ MP4 file is too small or corrupted (${MP4_SIZE_BYTES} bytes, need >10KB)"
+              rm -f "$MP4_FILE" "$MARKER"
+              ITERATION_FAILED=$((ITERATION_FAILED + 1))
+              FAILED_COUNT=$((FAILED_COUNT + 1))
+              continue
+            fi
               
               MP4_SIZE_GB=$(echo "scale=2; $MP4_SIZE_BYTES / 1024 / 1024 / 1024" | bc)
               
@@ -865,6 +897,23 @@ jobs:
                 echo "⚠️  WARNING: Large file (${MP4_SIZE_GB}GB) - upload may be slow"
                 EST_MINUTES=$(echo "$MP4_SIZE_GB * 10" | bc)
                 echo "Estimated upload time: ~${EST_MINUTES} minutes at 10MB/s"
+              fi
+              
+              # Check if we have enough time remaining for upload
+              CURRENT_TIME=$(date +%s)
+              TIME_ELAPSED=$((CURRENT_TIME - JOB_START))
+              TIME_REMAINING=$((MAX_JOB_TIME - TIME_ELAPSED))
+              
+              # Estimate upload time (assume 2MB/s minimum)
+              FILE_SIZE_MB=$(echo "scale=0; $MP4_SIZE_BYTES / 1024 / 1024" | bc)
+              ESTIMATED_UPLOAD_SECONDS=$((FILE_SIZE_MB / 2))
+              ESTIMATED_UPLOAD_MINUTES=$((ESTIMATED_UPLOAD_SECONDS / 60 + 10))  # Add 10 min buffer
+              
+              if [ $TIME_REMAINING -lt $((ESTIMATED_UPLOAD_MINUTES * 60)) ]; then
+                echo "⚠️  Skipping upload: Not enough time remaining"
+                echo "Need ~${ESTIMATED_UPLOAD_MINUTES} minutes, have $((TIME_REMAINING / 60)) minutes"
+                echo "File will be processed in next run"
+                continue
               fi
               
               # Step 2: Upload to GoFile with retry
@@ -1003,6 +1052,7 @@ jobs:
                     rm -f "$VIDEO_FILE" "$MP4_FILE" "$MARKER"
                     echo "✓ Local files deleted"
                     
+                    ITERATION_PROCESSED=$((ITERATION_PROCESSED + 1))
                     PROCESSED_COUNT=$((PROCESSED_COUNT + 1))
                   else
                     echo "✗ Upload failed: Invalid response"
@@ -1024,6 +1074,7 @@ jobs:
               
               if [ "$UPLOAD_SUCCESS" = "false" ]; then
                 echo "✗ Upload failed after $MAX_UPLOAD_ATTEMPTS attempts"
+                ITERATION_FAILED=$((ITERATION_FAILED + 1))
                 FAILED_COUNT=$((FAILED_COUNT + 1))
                 # Keep files for retry in next run
               fi
@@ -1031,9 +1082,11 @@ jobs:
           done
           
           echo ""
-          echo "=== Processing Complete ==="
-          echo "Processed: $PROCESSED_COUNT files"
-          echo "Failed: $FAILED_COUNT files"
+          echo "=== Iteration #$ITERATION Summary ==="
+          echo "Processed: $ITERATION_PROCESSED files"
+          echo "Failed: $ITERATION_FAILED files"
+          echo "Total processed: $PROCESSED_COUNT files"
+          echo "Total failed: $FAILED_COUNT files"
           
           if [ -f database/uploads.json ]; then
             TOTAL_UPLOADS=$(jq '.records | length' database/uploads.json 2>/dev/null || echo "0")
@@ -1067,12 +1120,14 @@ jobs:
           
           echo "============================"
           
+          fi  # End of else block (files found)
+          
           # If no files were processed, wait before next iteration
-          if [ "$PROCESSED_COUNT" -eq 0 ]; then
+          if [ "$ITERATION_PROCESSED" -eq 0 ]; then
             echo "No files processed this iteration - waiting 2 minutes before next check..."
             sleep 120
           else
-            echo "Processed $PROCESSED_COUNT file(s) - checking for more immediately..."
+            echo "Processed $ITERATION_PROCESSED file(s) - checking for more immediately..."
             sleep 5
           fi
           

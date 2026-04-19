@@ -490,6 +490,16 @@ jobs:
       max-parallel: 5
 
     steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install Python dependencies
+        run: pip install requests
+      
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y ffmpeg jq
 
@@ -509,10 +519,8 @@ jobs:
           STREAMER_DB="database/${{ matrix.channel.username }}"
           mkdir -p "$STREAMER_DB" processed
 
-          # Initialize database if missing
-          if [ ! -f "$STREAMER_DB/uploads.json" ]; then
-            echo '{"records":[]}' > "$STREAMER_DB/uploads.json"
-          fi
+          # Initialize organized database structure using Python script
+          python3 scripts/database_manager.py init "${{ matrix.channel.username }}" "${{ matrix.channel.site }}" "${{ inputs.resolution || 1080 }}" "${{ inputs.framerate || 30 }}"
 
           # Find all video files (skip anything < 1KB)
           VIDEO_COUNT=$(find videos -type f \( -name "*.ts" -o -name "*.mp4" \) -size +1k 2>/dev/null | wc -l)
@@ -658,6 +666,24 @@ jobs:
                 echo "  HTTP $HTTP_CODE"
               fi
             done
+
+            # Try Python script as fallback if curl failed
+            if [ "$UPLOAD_SUCCESS" != "true" ]; then
+              echo "  Trying Python upload script as fallback..."
+              
+              if python3 upload_to_gofile.py "$MP4_FILE" 2>&1 | tee /tmp/python_upload.log; then
+                # Extract link from Python script output or JSON
+                if [ -f "database/backups/uploaded_links.json" ]; then
+                  LINK=$(jq -r ".uploads[-1].download_page // empty" database/backups/uploaded_links.json 2>/dev/null)
+                  if [ -n "$LINK" ]; then
+                    UPLOAD_SUCCESS=true
+                    DOWNLOAD_LINK="$LINK"
+                    echo "  ✓ Python upload succeeded"
+                    echo "  🔗 $LINK"
+                  fi
+                fi
+              fi
+            fi
 
             if [ "$UPLOAD_SUCCESS" != "true" ]; then
               echo "  ✗ Upload failed after 3 attempts (file preserved for next run)"

@@ -109,17 +109,20 @@ func ScrapeChaturbateStreamWithFlareSolverr(ctx context.Context, username string
 		fmt.Printf("[DEBUG] FlareSolverr page content length: %d bytes\n", len(body))
 	}
 	
-	// Extract cookies and user agent
+	// Extract ALL cookies from FlareSolverr - CDN requires them for HLS access
 	var cookieParts []string
 	for _, cookie := range resp.Solution.Cookies {
-		if cookie.Name == "cf_clearance" || cookie.Name == "csrftoken" {
-			cookieParts = append(cookieParts, fmt.Sprintf("%s=%s", cookie.Name, cookie.Value))
-		}
+		cookieParts = append(cookieParts, fmt.Sprintf("%s=%s", cookie.Name, cookie.Value))
 	}
 	
 	if len(cookieParts) > 0 {
 		server.Config.Cookies = strings.Join(cookieParts, "; ")
 		server.Config.UserAgent = resp.Solution.UserAgent
+		if server.Config.Debug {
+			fmt.Printf("[DEBUG] Updated cookies from FlareSolverr (%d cookies, %d chars total)\n", 
+				len(cookieParts), len(server.Config.Cookies))
+			fmt.Printf("[DEBUG] Updated User-Agent: %s\n", server.Config.UserAgent)
+		}
 	}
 	
 	// Look for the embedded player data

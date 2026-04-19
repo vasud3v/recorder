@@ -14,7 +14,7 @@ from datetime import datetime
 class GoFileUploader:
     """Upload files to GoFile.io and manage links"""
     
-    def __init__(self, links_file="uploaded_links.json"):
+    def __init__(self, links_file="database/backups/uploaded_links.json"):
         self.links_file = links_file
         self.links_data = self.load_links()
         
@@ -160,7 +160,7 @@ def main():
         print("\nThe script will:")
         print("  • Upload the file to GoFile.io")
         print("  • Generate a download link")
-        print("  • Save the link to uploaded_links.json")
+        print("  • Save the link to database/backups/uploaded_links.json")
         sys.exit(1)
     
     uploader = GoFileUploader()

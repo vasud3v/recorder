@@ -1,0 +1,14 @@
+[
+  {
+    "is_paused": false,
+    "username": "honeyyykate",
+    "site": "chaturbate",
+    "framerate": 30,
+    "resolution": 1080,
+    "pattern": "videos/{{if ne .Site \"chaturbate\"}}{{.Site}}/{{end}}{{.Username}}_{{.Year}}-{{.Month}}-{{.Day}}_{{.Hour}}-{{.Minute}}-{{.Second}}{{if .Sequence}}_{{.Sequence}}{{end}}",
+    "max_duration": 1,
+    "max_filesize": 0,
+    "created_at": 0,
+    "streamed_at": 1776609618
+  }
+]

@@ -142,6 +142,13 @@ func (h *Req) GetBytes(ctx context.Context, url string) ([]byte, error) {
 	}
 	defer cancel()
 
+	if server.Config.Debug && h.isMedia && strings.Contains(url, ".m3u8") {
+		fmt.Printf("[DEBUG] HLS request to: %s\n", url)
+		fmt.Printf("[DEBUG]   Cookies: %s\n", req.Header.Get("Cookie"))
+		fmt.Printf("[DEBUG]   User-Agent: %s\n", req.Header.Get("User-Agent"))
+		fmt.Printf("[DEBUG]   Referer: %s\n", req.Header.Get("Referer"))
+	}
+
 	resp, err := h.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("client do: %w", err)
